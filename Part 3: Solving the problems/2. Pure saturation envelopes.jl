@@ -1,209 +1,475 @@
 ### A Pluto.jl notebook ###
-# v0.19.8
+# v0.19.9
 
 using Markdown
 using InteractiveUtils
 
-# ╔═╡ 23962934-2638-4788-9677-ae42245801ec
+# ╔═╡ 58b0aaa8-f47a-11ec-1113-9933151340be
 begin
-	using Clapeyron, ForwardDiff, Roots, Optim, LinearAlgebra, PolynomialRoots # Numerical packages
-	using LaTeXStrings, Plots, ShortCodes # Display and plotting
+	using Clapeyron, ForwardDiff, Roots, NLsolve, LinearAlgebra, PolynomialRoots # Numerical packages
+	using LaTeXStrings, Plots, ShortCodes, Printf # Display and plotting
 	using HypertextLiteral
 	# using JSON2, Tables,Random # Data handling
 end
 
-# ╔═╡ 30f48408-f16e-11ec-3d6b-650f1bf7f435
+# ╔═╡ e77e09f5-ce3c-4653-81a3-c252a5fb8793
+using StaticArrays
+
+# ╔═╡ c4b5bc07-7f17-47d2-a3e6-945813e29b35
 md"""
-### Section 3.1
-# 	Volume Solvers
+### Section 3.2
+# Saturation solvers for pure substances
 
-Now we know how to choose an equation of state for different situations, we need to investigate how to obtain the fluid properties at a specified state. To start with, we will look at how to solve for the volume at a given pressure, temperature, and phase for a pure fluid. From there, we will see how this changes when the phase is not known beforehand, and when dealing with a multicomponent mixture.
+According to the Gibbs phase rule, we only have 1 degree of freedom along the saturation curves for a pure substance. This means that we should be able to specify either pressure or temperature and determine the corresponding saturated point.
 
-Mathematically, this problem can be written as solving
+This can be solved in 2 ways, either as an optimisation problem formulated in just pressure or chemical potential, or a rootfinding problem using both equations. Generally root finding problems are far easier to solve numerically, so that formulation is definitely preferable.
 
-$$P(V,T_0,\vec{z}) = P_0$$
-
-for all values of $V$.
-
-## Pure fluids
-### Cubic EoS
-
-As you have seen in section 2, the general cubic equation of state can be written as
-
-$$P = \frac{RT}{v-b} - \frac{a\alpha(T)}{(v + \delta_1 b)(v + \delta_2b)}$$
-
-where the values of $\delta_1, \delta_2$ are specific to each equation of state (van der Waals, Peng Robinson, Redlich Kwong), and the form of the **alpha function**, $a(T)$, can be selected to match specific types of components or problems. In this workbook we will consider the van der Waals EoS, which is the case when 
-
-$$\delta_1 = \delta_2 = 0$$
-$$\alpha(T) = 1$$
-"""
-
-# ╔═╡ 2f3a7b9d-3dac-4e12-abb1-ce09cef36e93
-md"""
-Giving us
-
-$$P = \frac{RT}{V-b} - \frac{a}{V^2}$$
-
-where
-
-$$\begin{align} 
-a &= \frac{27}{64}\frac{(RT_c)^2}{P_c}\\
-b &= \frac{1}{8}\frac{RT_c}{P_c}\\
-\end{align}$$
-
-To solve this for the volume, we can leverage the fact you can rearrange it as a cubic equation in terms of the **compressibility factor**, Z.
-
-To do this, we multiply the expression through by the denominators and substitute in the definition of Z.
-
-$$Z = \frac{Pv}{RT}$$
+#### Temperature specification 
 
 $$\begin{gather}
-Pv^2(v-b) = RTv^2 - a(v-b)\\
-Pv^3 - (bP + RT)v^2 + av - ab = 0\\
-Z^3 - \left(1 + \frac{bP}{RT}\right)Z^2 + \left(\frac{aP}{(RT)^2}\right)Z - \frac{abP^2}{(RT)^3} = 0
+P(T_0, V_L) - P(T_0, V_V) = 0\\
+\mu(T_0, V_L) - \mu(T_0, V_V) = 0
 \end{gather}$$
 
-To express this cubic neatly we define 2 constants, $A$ and $B$.
+#### Pressure specification 
 
-$$\begin{align} 
-A &= a\cdot\frac{P}{(RT)^2}\\
-B &= b\cdot\frac{P}{RT}
-\end{align}$$
+$$\begin{gather}
+T(P_0, V_L) - T(P_0, V_V) = 0\\
+\mu(P_0, V_L) - \mu(P_0, V_V) = 0
+\end{gather}$$
 
-The cubic we then need to solve is
+#### Newton's method
 
-$$Z^3 - (1 + B)Z^2 + AZ - AB = 0$$
-
-A similar result can be obtained for any cubic equation.
-
-Let's now solve the van der Waals equation for  and see if our answers make sense. Complete the expressions for A and B in the code below:
+To solve our nonlinear root finding problem, we're going to use Newton's method. This uses the Jacobian (the matrix of first derivatives) to iterate from provided initial guesses. Usually, obtaining the Jacobian is either very annoying, requiring analytical derivatives, or very expensive, requiring finite differencing. We will use automatic differentiation to calculate this within our solver
 """
 
-# ╔═╡ 9aa9b5bf-f938-4e96-9ed1-bed5c53ff93c
+# ╔═╡ de8d6589-dbee-4577-a347-6a4f24c0447c
 begin
-	R = 8.314
-	(Tc, Pc) = (373.3, 89.7e5) # Critical parameters for H2S
-	(T, P) = (298.0, 101325.0) # Current state
-	a = 27/64 * (R*Tc)^2/Pc
-	b = 1/8 * (R*Tc)/Pc
-	A = a
-	B = b
-
-	poly = [1.0, -(1+B), A, -A*B]
-	Zvec = roots(poly)
+	# Specify our state
+	model = PR(["water"])
+	# model = PCSAFT(["water"])
+	T = 373.15 # K
+	# T = 285.0 # K
 end;
 
-# ╔═╡ 90baae39-478b-493c-ac23-4fadca9c3698
-@htl("""
-<table>
-  <tr>
-    <th>Root</th>
-    <th>Value</th>
-  </tr>
-  <tr>
-    <td>1</td>
-    <td>$(round(Zvec[1]))</td>
-  </tr>
-  <tr>
-    <td>2</td>
-    <td>$(round(Zvec[2]))</td>
-  </tr>
-  <tr>
-    <td>3</td>
-    <td>$(round(Zvec[3]))</td>
-  </tr>
-</table>
-""")
+# ╔═╡ 94e20664-95f2-4760-9bc4-b81df13328dc
+# Define our objective function to be zeroed
+function sat_P_objective(model, T, V)
+	# Unpack input array
+	Vl, Vv = V
+	
+	# Define the objective functions as specified above. 
+	# Use the functions below to do so:
+	#    P(V) = pressure(model, V, T)
+	#    μ(V) = Clapeyron.VT_chemical_potential(model, V, T)
+	# They're defined as inline functions for convenience
 
-# ╔═╡ 78ac6273-5029-4aa0-9e44-caacab4e40ef
+	# Define the return values f1, f2 here
+	# f1 = Vl - Vv
+	# f2 = Vl - Vv
+
+	# Answer
+	P(V) = pressure(model, V, T)
+	
+	μ(V) = Clapeyron.VT_chemical_potential(model, V, T)
+	f1 = (P(Vl) - P(Vv))
+	f2 = (μ(Vl) - μ(Vv))
+	return [f1, f2[1]]
+end
+
+# ╔═╡ fe3c0403-5447-4171-a536-5996cc11c77d
+function solve_sat_P(model, T, V0; itersmax=100, abstol=1e-5)
+	# Objective function accepting a vector of volumes, R²→R² 
+	f(V) = sat_P_objective(model, T, V)
+	# function returning the Jacobian of our solution, R²→R²ˣ²
+	Jf(V) = ForwardDiff.jacobian(f, V)
+
+	V = V0
+	fV = 1.0
+	iters = 0
+	# Iterate until converged or the loop has reached the maximum number of iterations 
+	while (iters < itersmax && any(abs.(fV) .> abstol))
+		JfV = Jf(V) # Calculate the jacobian
+		fV = f(V) # Calculate the value of f at V
+		d = -JfV\fV # Calculate the newton step
+		V = V .+ d # Take newton step
+		iters += 1 # Increment our iteration counter
+	end
+
+	# Show a warning if the solver did not converge (uses short circuit evaluation rather than if statement)
+	iters == itersmax && @warn "solver did not converge in $(iters) iterations\nfV=$(fV)"
+
+	P_sat = pressure(model, V[1], T)
+	return (P_sat, V[1], V[2])
+
+	# Throw an error if any values are returned as NaN (not a number)
+	# if any(isnan.(ret_val))
+	# 	@error "NaN return value"
+	# else
+	# 	return ret_val
+	# end
+end
+
+# ╔═╡ 03a0b678-0ad6-4c5a-b1d8-6497c9703ccb
+begin
+	# Initial guess for volumes
+	V0 = [2.26747e-5, 0.0320168]
+	# Solve the nonlinear system 
+	(P_sat, Vl, Vv) = solve_sat_P(model, T, V0; itersmax=100, abstol=1e-5)
+end
+
+# ╔═╡ 5f81ba8b-b7db-4571-b797-1a4ea06fa9a7
+begin
+	try
+		@htl("""
+		<table>
+		<caption>Solver Results</caption>
+		  <tr>
+		    <td>Temperature</td>
+		    <td>$(round(T; sigdigits=5))</td>
+		    <td>K</td>
+		  </tr>
+		  <tr>
+		    <td>Saturation pressure</td>
+		    <td>$(round(P_sat; sigdigits=4))</td>
+		    <td>Pa</td>
+		  </tr>
+		  <tr>
+			<td>Liquid volume</td>
+		    <td>$(@sprintf "%.2e" Vl)</td>
+			<td>m³</td>
+		  </tr>
+		  <tr>
+			<td>Vapour volume</td>
+		    <td>$(@sprintf "%.2e" Vv)</td>
+			<td>m³</td>
+		  </tr>
+		</table>
+		""")
+	catch
+	end
+end
+
+# ╔═╡ 685d5cc5-bda8-4033-a984-52e891e93caa
 md"""
-Now we have that working, we can see we have 3 real roots. How do we know which one to choose?
+Our solver worked, but let's take a closer look to see if we can make any improvements. If we take a look at our initial jacobian, we see that the entries span a few degrees of magnitude between the chemical potential and pressure. We also see that the entries corresponding to the liquid phase are considerably larger than those corresponding to the vapour phase. This is a **poorly scaled** Jacobian.
+
+$$J = \begin{pmatrix}
+\dfrac{\partial f_1}{\partial x_1} & \dfrac{\partial f_1}{\partial x_2}\\
+\dfrac{\partial f_2}{\partial x_1} & \dfrac{\partial f_2}{\partial x_2}
+\end{pmatrix}$$
 """
 
-# ╔═╡ 11bd73c1-c745-4d30-adc0-19209e0c0c82
+# ╔═╡ 4e55e0f7-31f2-460d-8a44-8f6ff80b1ac2
+let
+	function initial_jacobian(model, T, V0)
+		f(V) = sat_P_objective(model, T, V)
+		Jf(V) = ForwardDiff.jacobian(f, V)
+	return Jf(V0)
+	end
+	J0 = initial_jacobian(model, T, V0)
+	try
+		@htl("""
+		<table>
+		<caption>Initial Jacobian (to 4sf)</caption>
+		  <tr>
+		    <td></td>
+		    <th>Liquid</th>
+		    <th>Vapour</th>
+		  </tr>
+		  <tr>
+		    <th>Pressure</th>
+		    <td>$(round(J0[1]; sigdigits=4))</td>
+		    <td>$(round(J0[3]; sigdigits=4))</td>
+		  </tr>
+		  <tr>
+			<th>Chemical potential</th>
+		    <td>$(round(J0[2]; sigdigits=4))</td>
+		    <td>$(round(J0[4]; sigdigits=4))</td>
+		  </tr>
+		</table>
+		<center>
+		<b>cond</b>(<i>J</i>) = $(round(cond(J0); sigdigits=4))
+		</center>
+		""")
+	catch
+	end
+end
 
+# ╔═╡ ac60df8f-b66b-40fb-8c80-c1d9029c3753
+md"""
+We can also look at the [condition number](https://en.wikipedia.org/wiki/Condition_number) of the matrix to get an idea about how well it is scaled. Poorly scaled Jacobians present issues due to roundoff error due to floating point numbers, and limits the possible accuracy of our algorithm. If you experimented with the tolerances with the saturation pressure solver, you would notice that it becomes impossible to move past an absolute tolerance of $\approx 1e-7$.
 
-# ╔═╡ 4acb1393-030f-4cab-a765-f8de5a75893b
+As our inputs are strictly positive numbers, one method of improving the conditioning of this matrix is by iterating using $\log(V)$.
+"""
+
+# ╔═╡ d02f6d9f-3d3f-4ad0-949b-994e28866848
+let
+	function initial_jacobian_log(model, T, V0)
+		f(V) = sat_P_objective(model, T, exp.(V))
+		Jf(V) = ForwardDiff.jacobian(f, V)
+	return Jf(V0)
+	end
+	J0 = initial_jacobian_log(model, T, log.(V0))
+	try
+		@htl("""
+		<table>
+		<caption>Initial Jacobian using log(V)</caption>
+		  <tr>
+		    <td></td>
+		    <th>Liquid</th>
+		    <th>Vapour</th>
+		  </tr>
+		  <tr>
+		    <th>Pressure</th>
+		    <td>$(round(J0[1]; sigdigits=4))</td>
+		    <td>$(round(J0[3]; sigdigits=4))</td>
+		  </tr>
+		  <tr>
+			<th>Chemical potential</th>
+		    <td>$(round(J0[2]; sigdigits=4))</td>
+		    <td>$(round(J0[4]; sigdigits=4))</td>
+		  </tr>
+		</table>
+		<center>
+		<b>cond</b>(<i>J</i>) = $(round(cond(J0); sigdigits=4))
+		</center>
+		""")
+	catch
+	end
+end
+
+# ╔═╡ e7213a7f-6261-4386-b807-4ba69d1d34a7
+md"""
+The main improvement, however, can come from properly scaling our equations to begin with. By dividing $f_1$ by $1e5$, we see a massive improvement to the condition number, and are able to converge our saturation solver to a tolerance of $\approx 1e-12$
+"""
+
+# ╔═╡ 5548c4cc-b82c-43bb-a8fc-82edd145452e
+let
+	function sat_P_objective_scaled(model, T, V)
+		Vl, Vv = V
+		P(V) = pressure(model, V, T)
+		μ(V) = Clapeyron.VT_chemical_potential(model, V, T)
+		f1 = (P(Vl) - P(Vv))/1e5
+		f2 = (μ(Vl) - μ(Vv))
+		return [f1, f2[1]]
+	end
+	
+	function initial_jacobian_log(model, T, V0)
+		f(V) = sat_P_objective_scaled(model, T, exp.(V))
+		Jf(V) = ForwardDiff.jacobian(f, V)
+		return Jf(V0)
+	end
+	
+	J0 = initial_jacobian_log(model, T, log.(V0))
+	try
+		@htl("""
+		<table>
+		<caption>Initial Jacobian using log(V)<br>and scaled equations</caption>
+		  <tr>
+		    <td></td>
+		    <th>Liquid</th>
+		    <th>Vapour</th>
+		  </tr>
+		  <tr>
+		    <th>Pressure</th>
+		    <td>$(round(J0[1]; sigdigits=4))</td>
+		    <td>$(round(J0[3]; sigdigits=4))</td>
+		  </tr>
+		  <tr>
+			<th>Chemical potential</th>
+		    <td>$(round(J0[2]; sigdigits=4))</td>
+		    <td>$(round(J0[4]; sigdigits=4))</td>
+		  </tr>
+		</table>
+		<center>
+		<b>cond</b>(<i>J</i>) = $(round(cond(J0); sigdigits=4))
+		</center>
+		""")
+	catch
+	end
+end
+
+# ╔═╡ 2ffa15ba-9c9c-4d9e-b154-08bb251d0749
+md"""
+## Building phase diagrams
+
+Now we are able to determine the location of the saturation curve, how do we build up a graph of the entire phase boundary? We can call the solver we just wrote above again and again for different temperatures with the same initial guess, and for most cases it will probably converge. However, as before there are a particular number of difficulties near the critical point and the solver can become very sensitive to the initial guesses. 
+
+To help with this, we can reuse each previous result as the new guess to the solver. 
+
+When building this, remember that the triple point is not represented by typical equations of state. The critical point, however, is.
+"""
+
+# ╔═╡ c5109b81-887a-46e6-92da-10bda0397380
+begin
+	# The vector of temperature values
+	T_vec = range(285.0, 647.3, length=1000)
+	# Preallocate our pressure and volume vectors
+	P_vec = zeros(length(T_vec))
+	Vl_vec = zeros(length(T_vec))
+	Vv_vec = zeros(length(T_vec))
+	
+	V02 = [2.26747e-5, 0.0320168]
+	for (i, T) in enumerate(T_vec)
+		# Fill in the routine to iteratively solve for the saturation envelope
+		
+		# Answer
+		try
+			sat = solve_sat_P(model, T, V02)
+			
+			if ~any(isnan.(sat))
+				(P_vec[i], Vl_vec[i], Vv_vec[i]) = sat
+				V02 = [Vl_vec[i], Vv_vec[i]]
+			end
+		catch
+			continue
+		end
+	end
+	T_vec = T_vec[.!iszero.(P_vec)]
+	filter!.(!iszero, [P_vec, Vl_vec, Vv_vec])
+end
+
+# ╔═╡ 1f218041-692c-4d1c-b873-39bdf7c45ccd
+begin
+	begin
+		plot(title="PT plot for water", xlabel="T (K)", ylabel="P (Pa)")
+		plot!(T_vec, P_vec, label="", linewidth=2)
+	end
+end
+
+# ╔═╡ 4981857e-e33a-43fa-b4f3-d32db350a4e2
+begin
+	plot(xaxis=:log, title="VT plot for water", xlabel="V (m³)", ylabel="T (K)")
+	plot!(Vl_vec, T_vec, label="liquid", linewidth=2)
+	plot!(Vv_vec, T_vec, label="vapour", linewidth=2)
+end
+
+# ╔═╡ 65a528b6-eebb-422c-9221-f2bd9df0d2d2
+md"""
+## Points of interest
+
+Above, we traced the pure saturation envelope between two user-decided points. If one of these falls above the critical point, the saturation solver will either fail or converge to a trivial solution. If we want to determine the end point of our saturation curve before beginning calculation, how should we go about that?
+
+For a cubic equation of state the critical temperature and pressure are an input to the EoS, meaning for a pure substance you will always know the critical point beforehand. This is not the case for other equations of state, meaning it must be solved for numerically.
+
+The conditions for the critical point in a pure substance are:
+
+$$\begin{gather}
+f_1(V_m, T) = \left(\frac{\partial P(V_m,T)}{\partial V_m}\right)_{T} = 0\\
+f_2(V_m, T) = \left(\frac{\partial^2 P(V_m,T)}{\partial V_m^2}\right)_{T} = 0\\
+\end{gather}$$
+
+This would usually require analytical derivatives, as calculation with finite differences are both inaccurate and expensive, especially for higher order derivatives. However, automatic differentiation allows us to easily determine the exact derivatives in the objective function, as well as the higher order derivatives needed to solve this with a Newton algorithm. Note that although solver methods that do not rely on derivatives exist, it is faster to use derivative information if it is available.
+
+Rather than write the entire solver by hand, we will now rely on the trust region Newton exported by the NLsolve library. The format of this function is:
+
+```julia
+nlsolve(f!, initial_x, autodiff = :forward, method = :trust_region)
+```
+
+Note that ``!`` signifies an [in-place function](https://en.wikipedia.org/wiki/In-place_algorithm). This means that rather than returning a value, it updates the first value passed to the new values.
+"""
+
+# ╔═╡ e1920171-2bd8-4806-887e-359a1799e55b
+# Vc, Tc = exp.(res.zero)
+
+# ╔═╡ 7bb4dc67-650a-4347-a4ad-9be4ae071dd5
+let
+	T = 373.0
+	V = 3e-4
+	P(V) = pressure(model, V, T)
+	f1(V) = ForwardDiff.derivative(P, V)
+	f2(V) = ForwardDiff.derivative(f1, V)
+	f1(V), f2(V)
+end
+
+# ╔═╡ 90ae8c3e-f393-4560-a10e-36ae95e76691
+model2 = PCSAFT(["water"])
+
+# ╔═╡ 6d67868c-4457-4820-800d-3a61f57f81a0
+begin
+	# Define our objective function
+	# Note the ! signifies this is an in-place function
+	function critical_objective!(model, F, x)
+		# V, T = x
+		V = exp10(x[1])
+		T = x[2]
+		# P(V) = pressure(model, V, T)
+		# f1(V) = ForwardDiff.derivative(P, V)
+		# f2(V) = ForwardDiff.derivative(f1, V)
+		A(V) = Clapeyron.eos(model, V, T)
+		f1(V) = ForwardDiff.derivative(A, V)
+		f2(V) = ForwardDiff.derivative(f1, V)
+		F .= [f1(V), f2(V)]
+	end
+
+	res = nlsolve((F, x) -> critical_objective!(model2, F, x), [log10(3e-4), 643.0], autodiff = :forward, ftol=1e-10)
+	# Vc, Tc = exp.(res.zero)
+end
+
+# ╔═╡ 60999090-756a-4e91-a8b3-227c8a4cd1e9
+begin
+    ∂²A∂V², ∂³A∂V³ = Clapeyron.∂²³f(model2, 5.43514e-5, 697.378, SA[1.0])
+	-∂²A∂V², -∂³A∂V³
+end
+
+# ╔═╡ 3c0e2fc1-ce8b-45b6-b6b2-e5b970a62a4f
+begin
+	F = [0.0, 0.0]
+	Clapeyron.obj_crit(model2, F, 697.378, 5.43514e-5)
+end
+
+# ╔═╡ 51565eae-ae18-472e-bb37-548656c5b35c
+res2 = nlsolve((F, x) -> Clapeyron.obj_crit(model2, F, x[1], x[2]), [695.0, 5.5e-4])
+
+# ╔═╡ 43678e66-5361-4725-9802-d3e4e11e46a8
+Clapeyron.obj_crit(model2, F, 10.29221811917571, 321.5464072360518)
+
+# ╔═╡ c9251f8a-b7c8-44d7-bda8-19c544a9df23
+crit_pure(model2)
+
+# ╔═╡ c76a0c80-4a2b-4f34-ad7e-6b8cc4dad5a7
+crit_pure(model)
+
+# ╔═╡ 18f53692-50ab-4d2d-80dd-00d169fae340
 html"<br><br><br><br><br><br><br><br><br><br><br><br>"
 
-# ╔═╡ b9b2534e-bf13-4146-8b47-949ff0b0052e
+# ╔═╡ 365198f5-80d9-4ac1-adff-47a690cc9b4a
 md"## Function library
 
 Just some helper functions used in the notebook."
 
-# ╔═╡ 332ab61e-91d2-4dd7-9a59-699d8f6a4de1
-md"""
-###### Specific
-"""
-
-# ╔═╡ 59fa344c-6c05-493a-9d2f-683199bec78b
-struct PT_crit
-	Pc
-	Tc
+# ╔═╡ e5f39d39-c08e-4199-9952-119f21d13612
+function acentric_factor(pure)
+	Tc,pc,_ = crit_pure(pure)
+	ps = first(saturation_pressure(pure,0.7*Tc))
+	ω = -log10(ps/pc) - 1.0
+	return ω
 end
 
-# ╔═╡ e924ba5f-dbe0-464b-bf24-f865f103f66e
-struct PT_state
-	P
-	T
-end
-
-# ╔═╡ 6e576917-f1c5-4535-b8d4-a9d1c7814e30
-struct vdW_params
-	a
-	b
-end
-
-# ╔═╡ d6ae4c8a-ab5b-413f-88df-b5f4fc678ff9
-md"""
-###### Generic
-"""
-
-# ╔═╡ d0b2f6bb-7539-4dda-adc9-acc2ce9cca4a
+# ╔═╡ 33ed3f41-3107-4497-85e0-aa7de6686612
 hint(text) = Markdown.MD(Markdown.Admonition("hint", "Hint", [text]))
 
-# ╔═╡ 8fe83aab-d193-4a28-a763-6420abcbb176
+# ╔═╡ bb419121-16b9-4344-b245-3e19f8d4830a
 almost(text) = Markdown.MD(Markdown.Admonition("warning", "Almost there!", [text]))
 
-# ╔═╡ 94caf041-6363-4b38-b2c2-daaf5a6aecf1
+# ╔═╡ bb4b3b1b-702b-4462-967d-2d25bfe3f226
 still_missing(text=md"Replace `missing` with your answer.") = Markdown.MD(Markdown.Admonition("warning", "Here we go!", [text]))
 
-# ╔═╡ 217956f7-f5f5-4345-8642-7736dc4321d7
+# ╔═╡ 7c415b6a-cb43-4d7e-8a5f-76a0e510cabd
 keep_working(text=md"The answer is not quite right.") = Markdown.MD(Markdown.Admonition("danger", "Keep working on it!", [text]))
 
-# ╔═╡ dbe0cb67-b166-40b6-aeaf-a2e2d6ca4c87
+# ╔═╡ f7066d86-00f8-441f-868b-7c94037b36ac
 yays = [md"Fantastic!", md"Splendid!", md"Great!", md"Yay ❤", md"Great! 🎉", md"Well done!", md"Keep it up!", md"Good job!", md"Awesome!", md"You got the right answer!", md"Let's move on to the next section."]
 
-# ╔═╡ f67c10e6-8aa1-4eed-9561-b629fa8ac91b
+# ╔═╡ 02759a14-8161-4332-b960-3d3a5f052d19
 correct(text=rand(yays)) = Markdown.MD(Markdown.Admonition("correct", "Got it!", [text]))
 
-# ╔═╡ 970bb661-c959-4f0c-a1d6-50f655b80ef8
-not_defined(variable_name) = Markdown.MD(Markdown.Admonition("danger", "Oopsie!", [md"Make sure that you define a variable called **$(Markdown.Code(string(variable_name)))**"]))
+# ╔═╡ a676acf4-e167-425c-b63e-9c9fb8c24d13
+not_defined(variable_name) = Markdown.MD(Markdown.Admonition("danger", "Oopsie!", [md"Make sure that you define **$(Markdown.Code(string(variable_name)))**"]))
 
-# ╔═╡ 156674ce-b49e-44b6-8182-7f8da0a394af
-if !@isdefined(Zvec)
-	not_defined(:Zvec)
-else
-	let
-		Asol = a*P/(R*T)^2
-		Bsol = b*P/(R*T)
-		if (A==Asol) && (B==Bsol)
-			if (Zvec == roots([1.0, -(1+Bsol), Asol, -Asol*Bsol]))
-				correct()
-			else
-				almost(md"Make sure `poly` and `Zvec` are defined correctly")
-			end
-		elseif (A==Asol)
-			still_missing(md"Make sure `B` is defined correctly")
-		elseif (B==Bsol)
-			still_missing(md"Make sure `A` is defined correctly")
-		else
-			keep_working(md"Make sure you've defined `A` and `B` carefully")
-		end
-	end
-end
-
-# ╔═╡ 1333f8e7-bfdd-4f80-8eaa-124d184b03c6
+# ╔═╡ 642da62e-9369-4b4b-b747-390243ec7103
 function data_table(headers, names, values)
 	app_id = randstring('a':'z')
 	data = JSON2.write(Dict(
@@ -246,7 +512,7 @@ function data_table(headers, names, values)
 	""")
 end
 
-# ╔═╡ 5b27286b-0a51-49ff-a783-90bf8334e080
+# ╔═╡ b52f84b1-1458-4ec2-8f8b-f94e96940480
 # begin
 # 	headers = ["Variable", "Value"]
 # 	names = ["c₁", "c₂", "c₃"]
@@ -254,7 +520,7 @@ end
 # 	data_table(headers, names, values)
 # end
 
-# ╔═╡ e3a0f37d-dd52-4d00-99a1-37076a474de0
+# ╔═╡ e799ebf3-55ca-4b9a-b1dd-6009b90bd4ec
 function latex_table(headers, names, values) # TODO: Make this work on input lists?
 	str1 = join([L"&"*h for h in headers])
 	str2 = join([names[i]*"&"*values[i]*"\\" for i in range(1,length(zip(names, values)))])
@@ -271,7 +537,7 @@ function latex_table(headers, names, values) # TODO: Make this work on input lis
 	# """
 end
 
-# ╔═╡ e41c0fe1-6b26-4194-868b-34259293243c
+# ╔═╡ a1f47444-5aa6-4ffe-aad3-2571ff774d13
 md"""
 $\begin{array}{lc}
 \hline \text{Variable} & \text { Value } \\
@@ -282,6 +548,12 @@ $\begin{array}{lc}
 \end{array}$
 """
 
+# ╔═╡ 512804d7-8fad-43c1-919a-468640bdcde5
+function reduce_complex(Zvec)
+	Zvec = Vector{Union{Float64, ComplexF64}}(Zvec)
+	Zvec[abs.(imag.(Zvec)) .< eps()] .= real(Zvec[abs.(imag.(Zvec)) .< eps()])
+end
+
 # ╔═╡ 00000000-0000-0000-0000-000000000001
 PLUTO_PROJECT_TOML_CONTENTS = """
 [deps]
@@ -290,22 +562,25 @@ ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
 HypertextLiteral = "ac1192a8-f4b3-4bfe-ba22-af5b92cd3ab2"
 LaTeXStrings = "b964fa9f-0449-5b57-a5c2-d3ea65f4040f"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
-Optim = "429524aa-4258-5aef-a3af-852621145aeb"
+NLsolve = "2774e3e8-f4cf-5e23-947b-6d7e65073b56"
 Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
 PolynomialRoots = "3a141323-8675-5d76-9d11-e1df1406c778"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 Roots = "f2b01f46-fcfa-551c-844a-d8ac1e96c665"
 ShortCodes = "f62ebe17-55c5-4640-972f-b59c0dd11ccf"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
 [compat]
 Clapeyron = "~0.3.6"
 ForwardDiff = "~0.10.30"
 HypertextLiteral = "~0.9.4"
 LaTeXStrings = "~1.3.0"
-Optim = "~1.7.0"
-Plots = "~1.30.1"
+NLsolve = "~4.5.1"
+Plots = "~1.31.1"
 PolynomialRoots = "~1.0.0"
 Roots = "~2.0.1"
 ShortCodes = "~0.3.3"
+StaticArrays = "~1.5.0"
 """
 
 # ╔═╡ 00000000-0000-0000-0000-000000000002
@@ -326,9 +601,9 @@ uuid = "0dad84c5-d112-42e6-8d28-ef12dabb789f"
 
 [[deps.ArrayInterfaceCore]]
 deps = ["LinearAlgebra", "SparseArrays", "SuiteSparse"]
-git-tree-sha1 = "d618d3cf75e8ed5064670e939289698ecf426c7f"
+git-tree-sha1 = "5e732808bcf7bbf730e810a9eaafc52705b38bb5"
 uuid = "30b0a656-2188-435a-8636-2ec0e6a096e2"
-version = "0.1.12"
+version = "0.1.13"
 
 [[deps.Artifacts]]
 uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
@@ -397,9 +672,9 @@ version = "0.7.0"
 
 [[deps.ColorSchemes]]
 deps = ["ColorTypes", "ColorVectorSpace", "Colors", "FixedPointNumbers", "Random"]
-git-tree-sha1 = "7297381ccb5df764549818d9a7d57e45f1057d30"
+git-tree-sha1 = "1fd869cc3875b57347f7027521f561cf46d1fcd8"
 uuid = "35d6a980-a343-548e-a6ea-1d62b119f2f4"
-version = "3.18.0"
+version = "3.19.0"
 
 [[deps.ColorTypes]]
 deps = ["FixedPointNumbers", "Random"]
@@ -493,6 +768,12 @@ deps = ["IrrationalConstants", "LogExpFunctions", "NaNMath", "Random", "SpecialF
 git-tree-sha1 = "28d605d9a0ac17118fe2c5e9ce0fbb76c3ceb120"
 uuid = "b552c78f-8df3-52c6-915a-8e097449b14b"
 version = "1.11.0"
+
+[[deps.Distances]]
+deps = ["LinearAlgebra", "SparseArrays", "Statistics", "StatsAPI"]
+git-tree-sha1 = "3258d0659f812acde79e8a74b11f17ac06d0ca04"
+uuid = "b4f34e82-e78d-54a5-968a-f98e89d6e8f7"
+version = "0.10.7"
 
 [[deps.Distributed]]
 deps = ["Random", "Serialization", "Sockets"]
@@ -909,6 +1190,12 @@ git-tree-sha1 = "50310f934e55e5ca3912fb941dec199b49ca9b68"
 uuid = "d41bc354-129a-5804-8e4c-c37616107c6c"
 version = "7.8.2"
 
+[[deps.NLsolve]]
+deps = ["Distances", "LineSearches", "LinearAlgebra", "NLSolversBase", "Printf", "Reexport"]
+git-tree-sha1 = "019f12e9a1a7880459d0173c182e6a99365d7ac1"
+uuid = "2774e3e8-f4cf-5e23-947b-6d7e65073b56"
+version = "4.5.1"
+
 [[deps.NaNMath]]
 git-tree-sha1 = "b086b7ea07f8e38cf122f5016af580881ac914fe"
 uuid = "77ba4419-2d1f-58cd-9bb1-8ffee604a2e3"
@@ -933,21 +1220,15 @@ uuid = "05823500-19ac-5b8b-9628-191a04bc5112"
 
 [[deps.OpenSSL_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
-git-tree-sha1 = "ab05aa4cc89736e95915b01e7279e61b1bfe33b8"
+git-tree-sha1 = "9a36165cf84cff35851809a40a928e1103702013"
 uuid = "458c3c95-2e84-50aa-8efc-19380b2a3a95"
-version = "1.1.14+0"
+version = "1.1.16+0"
 
 [[deps.OpenSpecFun_jll]]
 deps = ["Artifacts", "CompilerSupportLibraries_jll", "JLLWrappers", "Libdl", "Pkg"]
 git-tree-sha1 = "13652491f6856acfd2db29360e1bbcd4565d04f1"
 uuid = "efe28fd5-8261-553b-a9e1-b2916fc3738e"
 version = "0.5.5+0"
-
-[[deps.Optim]]
-deps = ["Compat", "FillArrays", "ForwardDiff", "LineSearches", "LinearAlgebra", "NLSolversBase", "NaNMath", "Parameters", "PositiveFactorizations", "Printf", "SparseArrays", "StatsBase"]
-git-tree-sha1 = "7a28efc8e34d5df89fc87343318b0a8add2c4021"
-uuid = "429524aa-4258-5aef-a3af-852621145aeb"
-version = "1.7.0"
 
 [[deps.Opus_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
@@ -1007,15 +1288,15 @@ version = "3.0.0"
 
 [[deps.PlotUtils]]
 deps = ["ColorSchemes", "Colors", "Dates", "Printf", "Random", "Reexport", "Statistics"]
-git-tree-sha1 = "bb16469fd5224100e422f0b027d26c5a25de1200"
+git-tree-sha1 = "9888e59493658e476d3073f1ce24348bdc086660"
 uuid = "995b91a9-d308-5afd-9ec6-746e21dbc043"
-version = "1.2.0"
+version = "1.3.0"
 
 [[deps.Plots]]
 deps = ["Base64", "Contour", "Dates", "Downloads", "FFMPEG", "FixedPointNumbers", "GR", "GeometryBasics", "JSON", "Latexify", "LinearAlgebra", "Measures", "NaNMath", "Pkg", "PlotThemes", "PlotUtils", "Printf", "REPL", "Random", "RecipesBase", "RecipesPipeline", "Reexport", "Requires", "Scratch", "Showoff", "SparseArrays", "Statistics", "StatsBase", "UUIDs", "UnicodeFun", "Unzip"]
-git-tree-sha1 = "2402dffcbc5bb1631fb4f10cb5c3698acdce29ea"
+git-tree-sha1 = "93e82cebd5b25eb33068570e3f63a86be16955be"
 uuid = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
-version = "1.30.1"
+version = "1.31.1"
 
 [[deps.PolynomialRoots]]
 git-tree-sha1 = "5f807b5345093487f733e520a1b7395ee9324825"
@@ -1175,10 +1456,15 @@ uuid = "276daf66-3868-5448-9aa4-cd146d93841b"
 version = "2.1.6"
 
 [[deps.StaticArrays]]
-deps = ["LinearAlgebra", "Random", "Statistics"]
-git-tree-sha1 = "2bbd9f2e40afd197a1379aef05e0d85dba649951"
+deps = ["LinearAlgebra", "Random", "StaticArraysCore", "Statistics"]
+git-tree-sha1 = "9f8a5dc5944dc7fbbe6eb4180660935653b0a9d9"
 uuid = "90137ffa-7385-5640-81b9-e52037218182"
-version = "1.4.7"
+version = "1.5.0"
+
+[[deps.StaticArraysCore]]
+git-tree-sha1 = "6edcea211d224fa551ec8a85debdc6d732f155dc"
+uuid = "1e83bf80-4336-4d27-bf5d-d5a4f845583c"
+version = "1.0.0"
 
 [[deps.Statistics]]
 deps = ["LinearAlgebra", "SparseArrays"]
@@ -1192,9 +1478,9 @@ version = "1.4.0"
 
 [[deps.StatsBase]]
 deps = ["DataAPI", "DataStructures", "LinearAlgebra", "LogExpFunctions", "Missings", "Printf", "Random", "SortingAlgorithms", "SparseArrays", "Statistics", "StatsAPI"]
-git-tree-sha1 = "8977b17906b0a1cc74ab2e3a05faa16cf08a8291"
+git-tree-sha1 = "642f08bf9ff9e39ccc7b710b2eb9a24971b52b1a"
 uuid = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
-version = "0.33.16"
+version = "0.33.17"
 
 [[deps.StatsFuns]]
 deps = ["ChainRulesCore", "HypergeometricFunctions", "InverseFunctions", "IrrationalConstants", "LogExpFunctions", "Reexport", "Rmath", "SpecialFunctions"]
@@ -1204,9 +1490,9 @@ version = "1.0.1"
 
 [[deps.StructArrays]]
 deps = ["Adapt", "DataAPI", "StaticArrays", "Tables"]
-git-tree-sha1 = "9abba8f8fb8458e9adf07c8a2377a070674a24f1"
+git-tree-sha1 = "55ef24d228f9396fa9e2317eb60c953b8cec1ae7"
 uuid = "09ab397b-f2b6-538f-b94a-2f83cf4a842a"
-version = "0.6.8"
+version = "0.6.10"
 
 [[deps.StructTypes]]
 deps = ["Dates", "UUIDs"]
@@ -1521,31 +1807,49 @@ version = "0.9.1+5"
 """
 
 # ╔═╡ Cell order:
-# ╟─23962934-2638-4788-9677-ae42245801ec
-# ╟─30f48408-f16e-11ec-3d6b-650f1bf7f435
-# ╟─2f3a7b9d-3dac-4e12-abb1-ce09cef36e93
-# ╠═9aa9b5bf-f938-4e96-9ed1-bed5c53ff93c
-# ╟─90baae39-478b-493c-ac23-4fadca9c3698
-# ╟─156674ce-b49e-44b6-8182-7f8da0a394af
-# ╟─78ac6273-5029-4aa0-9e44-caacab4e40ef
-# ╠═11bd73c1-c745-4d30-adc0-19209e0c0c82
-# ╟─4acb1393-030f-4cab-a765-f8de5a75893b
-# ╟─b9b2534e-bf13-4146-8b47-949ff0b0052e
-# ╟─332ab61e-91d2-4dd7-9a59-699d8f6a4de1
-# ╠═59fa344c-6c05-493a-9d2f-683199bec78b
-# ╠═e924ba5f-dbe0-464b-bf24-f865f103f66e
-# ╠═6e576917-f1c5-4535-b8d4-a9d1c7814e30
-# ╟─d6ae4c8a-ab5b-413f-88df-b5f4fc678ff9
-# ╟─d0b2f6bb-7539-4dda-adc9-acc2ce9cca4a
-# ╟─8fe83aab-d193-4a28-a763-6420abcbb176
-# ╟─94caf041-6363-4b38-b2c2-daaf5a6aecf1
-# ╟─217956f7-f5f5-4345-8642-7736dc4321d7
-# ╟─dbe0cb67-b166-40b6-aeaf-a2e2d6ca4c87
-# ╟─f67c10e6-8aa1-4eed-9561-b629fa8ac91b
-# ╟─970bb661-c959-4f0c-a1d6-50f655b80ef8
-# ╟─1333f8e7-bfdd-4f80-8eaa-124d184b03c6
-# ╟─5b27286b-0a51-49ff-a783-90bf8334e080
-# ╟─e3a0f37d-dd52-4d00-99a1-37076a474de0
-# ╟─e41c0fe1-6b26-4194-868b-34259293243c
+# ╟─58b0aaa8-f47a-11ec-1113-9933151340be
+# ╟─c4b5bc07-7f17-47d2-a3e6-945813e29b35
+# ╠═de8d6589-dbee-4577-a347-6a4f24c0447c
+# ╠═94e20664-95f2-4760-9bc4-b81df13328dc
+# ╠═fe3c0403-5447-4171-a536-5996cc11c77d
+# ╠═03a0b678-0ad6-4c5a-b1d8-6497c9703ccb
+# ╟─5f81ba8b-b7db-4571-b797-1a4ea06fa9a7
+# ╟─685d5cc5-bda8-4033-a984-52e891e93caa
+# ╟─4e55e0f7-31f2-460d-8a44-8f6ff80b1ac2
+# ╟─ac60df8f-b66b-40fb-8c80-c1d9029c3753
+# ╟─d02f6d9f-3d3f-4ad0-949b-994e28866848
+# ╟─e7213a7f-6261-4386-b807-4ba69d1d34a7
+# ╟─5548c4cc-b82c-43bb-a8fc-82edd145452e
+# ╟─2ffa15ba-9c9c-4d9e-b154-08bb251d0749
+# ╠═c5109b81-887a-46e6-92da-10bda0397380
+# ╟─1f218041-692c-4d1c-b873-39bdf7c45ccd
+# ╟─4981857e-e33a-43fa-b4f3-d32db350a4e2
+# ╟─65a528b6-eebb-422c-9221-f2bd9df0d2d2
+# ╠═6d67868c-4457-4820-800d-3a61f57f81a0
+# ╠═e1920171-2bd8-4806-887e-359a1799e55b
+# ╠═7bb4dc67-650a-4347-a4ad-9be4ae071dd5
+# ╠═e77e09f5-ce3c-4653-81a3-c252a5fb8793
+# ╠═90ae8c3e-f393-4560-a10e-36ae95e76691
+# ╠═60999090-756a-4e91-a8b3-227c8a4cd1e9
+# ╠═3c0e2fc1-ce8b-45b6-b6b2-e5b970a62a4f
+# ╠═51565eae-ae18-472e-bb37-548656c5b35c
+# ╠═43678e66-5361-4725-9802-d3e4e11e46a8
+# ╠═c9251f8a-b7c8-44d7-bda8-19c544a9df23
+# ╠═c76a0c80-4a2b-4f34-ad7e-6b8cc4dad5a7
+# ╟─18f53692-50ab-4d2d-80dd-00d169fae340
+# ╟─365198f5-80d9-4ac1-adff-47a690cc9b4a
+# ╟─e5f39d39-c08e-4199-9952-119f21d13612
+# ╟─33ed3f41-3107-4497-85e0-aa7de6686612
+# ╟─bb419121-16b9-4344-b245-3e19f8d4830a
+# ╟─bb4b3b1b-702b-4462-967d-2d25bfe3f226
+# ╟─7c415b6a-cb43-4d7e-8a5f-76a0e510cabd
+# ╟─f7066d86-00f8-441f-868b-7c94037b36ac
+# ╟─02759a14-8161-4332-b960-3d3a5f052d19
+# ╟─a676acf4-e167-425c-b63e-9c9fb8c24d13
+# ╟─642da62e-9369-4b4b-b747-390243ec7103
+# ╟─b52f84b1-1458-4ec2-8f8b-f94e96940480
+# ╟─e799ebf3-55ca-4b9a-b1dd-6009b90bd4ec
+# ╟─a1f47444-5aa6-4ffe-aad3-2571ff774d13
+# ╟─512804d7-8fad-43c1-919a-468640bdcde5
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002
