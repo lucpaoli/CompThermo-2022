@@ -4,554 +4,192 @@
 using Markdown
 using InteractiveUtils
 
-# ╔═╡ 58b0aaa8-f47a-11ec-1113-9933151340be
-begin
-	using Clapeyron, ForwardDiff, Roots, NLsolve, LinearAlgebra, PolynomialRoots # Numerical packages
-	using LaTeXStrings, Plots, ShortCodes, Printf # Display and plotting
-	using HypertextLiteral
-	# using JSON2, Tables,Random # Data handling
+# This Pluto notebook uses @bind for interactivity. When running this notebook outside of Pluto, the following 'mock version' of @bind gives bound variables a default value (instead of an error).
+macro bind(def, element)
+    quote
+        local iv = try Base.loaded_modules[Base.PkgId(Base.UUID("6e696c72-6542-2067-7265-42206c756150"), "AbstractPlutoDingetjes")].Bonds.initial_value catch; b -> missing; end
+        local el = $(esc(element))
+        global $(esc(def)) = Core.applicable(Base.get, el) ? Base.get(el) : iv(el)
+        el
+    end
 end
 
-# ╔═╡ e77e09f5-ce3c-4653-81a3-c252a5fb8793
-using StaticArrays
+# ╔═╡ a598b2d2-f15c-11ec-10ed-a15ca6a73a60
+begin
+	using Clapeyron, ForwardDiff, Roots, Optim, LinearAlgebra
+	using LaTeXStrings, Plots, PlutoUI
+	using Unitful
+end
 
-# ╔═╡ c4b5bc07-7f17-47d2-a3e6-945813e29b35
+# ╔═╡ 04089557-9381-4bbb-9882-45b5a685694b
 md"""
-### Section 3.2
-# Saturation solvers for pure substances
+### Section 3.3
+# Stability Analysis
 
-According to the Gibbs phase rule, we only have 1 degree of freedom along the saturation curves for a pure substance. This means that we should be able to specify either pressure or temperature and determine the corresponding saturated point.
+Stability analysis deals with the question **how** do we know if a phase split occurs. To begin to understand this, we can begin by visualising this with a binary mixture.
 
-This can be solved in 2 ways, either as an optimisation problem formulated in just pressure or chemical potential, or a rootfinding problem using both equations. Generally root finding problems are far easier to solve numerically, so that formulation is definitely preferable.
-
-#### Temperature specification 
-
-$$\begin{gather}
-P(T_0, V_L) - P(T_0, V_V) = 0\\
-\mu(T_0, V_L) - \mu(T_0, V_V) = 0
-\end{gather}$$
-
-#### Pressure specification 
-
-$$\begin{gather}
-T(P_0, V_L) - T(P_0, V_V) = 0\\
-\mu(P_0, V_L) - \mu(P_0, V_V) = 0
-\end{gather}$$
-
-#### Newton's method
-
-To solve our nonlinear root finding problem, we're going to use Newton's method. This uses the Jacobian (the matrix of first derivatives) to iterate from provided initial guesses. Usually, obtaining the Jacobian is either very annoying, requiring analytical derivatives, or very expensive, requiring finite differencing. We will use automatic differentiation to calculate this within our solver
+We know
 """
 
-# ╔═╡ de8d6589-dbee-4577-a347-6a4f24c0447c
-begin
-	# Specify our state
-	model = PR(["water"])
-	# model = PCSAFT(["water"])
-	T = 373.15 # K
-	# T = 285.0 # K
-end;
+# ╔═╡ a264538b-fd99-46c7-9e7b-5a98b7bba679
+# model = PCSAFT(["benzene", "toluene"]) # PCSAFT has issue with type promotion
+model = PR(["benzene", "toluene"])
 
-# ╔═╡ 94e20664-95f2-4760-9bc4-b81df13328dc
-# Define our objective function to be zeroed
-function sat_P_objective(model, T, V)
-	# Unpack input array
-	Vl, Vv = V
-	
-	# Define the objective functions as specified above. 
-	# Use the functions below to do so:
-	#    P(V) = pressure(model, V, T)
-	#    μ(V) = Clapeyron.VT_chemical_potential(model, V, T)
-	# They're defined as inline functions for convenience
-
-	# Define the return values f1, f2 here
-	# f1 = Vl - Vv
-	# f2 = Vl - Vv
-
-	# Answer
-	P(V) = pressure(model, V, T)
-	
-	μ(V) = Clapeyron.VT_chemical_potential(model, V, T)
-	f1 = (P(Vl) - P(Vv))
-	f2 = (μ(Vl) - μ(Vv))
-	return [f1, f2[1]]
-end
-
-# ╔═╡ fe3c0403-5447-4171-a536-5996cc11c77d
-function solve_sat_P(model, T, V0; itersmax=100, abstol=1e-5)
-	# Objective function accepting a vector of volumes, R²→R² 
-	f(V) = sat_P_objective(model, T, V)
-	# function returning the Jacobian of our solution, R²→R²ˣ²
-	Jf(V) = ForwardDiff.jacobian(f, V)
-
-	V = V0
-	fV = 1.0
-	iters = 0
-	# Iterate until converged or the loop has reached the maximum number of iterations 
-	while (iters < itersmax && any(abs.(fV) .> abstol))
-		JfV = Jf(V) # Calculate the jacobian
-		fV = f(V) # Calculate the value of f at V
-		d = -JfV\fV # Calculate the newton step
-		V = V .+ d # Take newton step
-		iters += 1 # Increment our iteration counter
-	end
-
-	# Show a warning if the solver did not converge (uses short circuit evaluation rather than if statement)
-	iters == itersmax && @warn "solver did not converge in $(iters) iterations\nfV=$(fV)"
-
-	P_sat = pressure(model, V[1], T)
-	return (P_sat, V[1], V[2])
-
-	# Throw an error if any values are returned as NaN (not a number)
-	# if any(isnan.(ret_val))
-	# 	@error "NaN return value"
-	# else
-	# 	return ret_val
-	# end
-end
-
-# ╔═╡ 03a0b678-0ad6-4c5a-b1d8-6497c9703ccb
-begin
-	# Initial guess for volumes
-	V0 = [2.26747e-5, 0.0320168]
-	# Solve the nonlinear system 
-	(P_sat, Vl, Vv) = solve_sat_P(model, T, V0; itersmax=100, abstol=1e-5)
-end
-
-# ╔═╡ 5f81ba8b-b7db-4571-b797-1a4ea06fa9a7
-begin
-	try
-		@htl("""
-		<table>
-		<caption>Solver Results</caption>
-		  <tr>
-		    <td>Temperature</td>
-		    <td>$(round(T; sigdigits=5))</td>
-		    <td>K</td>
-		  </tr>
-		  <tr>
-		    <td>Saturation pressure</td>
-		    <td>$(round(P_sat; sigdigits=4))</td>
-		    <td>Pa</td>
-		  </tr>
-		  <tr>
-			<td>Liquid volume</td>
-		    <td>$(@sprintf "%.2e" Vl)</td>
-			<td>m³</td>
-		  </tr>
-		  <tr>
-			<td>Vapour volume</td>
-		    <td>$(@sprintf "%.2e" Vv)</td>
-			<td>m³</td>
-		  </tr>
-		</table>
-		""")
-	catch
-	end
-end
-
-# ╔═╡ 685d5cc5-bda8-4033-a984-52e891e93caa
+# ╔═╡ 2cae3aeb-696a-4e82-ae5a-da00221fec81
 md"""
-Our solver worked, but let's take a closer look to see if we can make any improvements. If we take a look at our initial jacobian, we see that the entries span a few degrees of magnitude between the chemical potential and pressure. We also see that the entries corresponding to the liquid phase are considerably larger than those corresponding to the vapour phase. This is a **poorly scaled** Jacobian.
-
-$$J = \begin{pmatrix}
-\dfrac{\partial f_1}{\partial x_1} & \dfrac{\partial f_1}{\partial x_2}\\
-\dfrac{\partial f_2}{\partial x_1} & \dfrac{\partial f_2}{\partial x_2}
-\end{pmatrix}$$
+Specify a pressure and temperature. (default values 1.75 bar, 398 K)
 """
 
-# ╔═╡ 4e55e0f7-31f2-460d-8a44-8f6ff80b1ac2
-let
-	function initial_jacobian(model, T, V0)
-		f(V) = sat_P_objective(model, T, V)
-		Jf(V) = ForwardDiff.jacobian(f, V)
-	return Jf(V0)
-	end
-	J0 = initial_jacobian(model, T, V0)
-	try
-		@htl("""
-		<table>
-		<caption>Initial Jacobian (to 4sf)</caption>
-		  <tr>
-		    <td></td>
-		    <th>Liquid</th>
-		    <th>Vapour</th>
-		  </tr>
-		  <tr>
-		    <th>Pressure</th>
-		    <td>$(round(J0[1]; sigdigits=4))</td>
-		    <td>$(round(J0[3]; sigdigits=4))</td>
-		  </tr>
-		  <tr>
-			<th>Chemical potential</th>
-		    <td>$(round(J0[2]; sigdigits=4))</td>
-		    <td>$(round(J0[4]; sigdigits=4))</td>
-		  </tr>
-		</table>
-		<center>
-		<b>cond</b>(<i>J</i>) = $(round(cond(J0); sigdigits=4))
-		</center>
-		""")
-	catch
-	end
+# ╔═╡ fdd147c7-10d0-4f28-857f-342f070333f0
+begin
+	# Unitful just used to get nicely presented units. Would probably be better to define a custom type that just carries forward the unit as text.
+	pressure_slider = @bind p1 Slider(0.05u"bar":0.05u"bar":10u"bar", default=1.75u"bar", show_value=true)
+	md"""Pressure =\
+	$pressure_slider"""
 end
 
-# ╔═╡ ac60df8f-b66b-40fb-8c80-c1d9029c3753
-md"""
-We can also look at the [condition number](https://en.wikipedia.org/wiki/Condition_number) of the matrix to get an idea about how well it is scaled. Poorly scaled Jacobians present issues due to roundoff error due to floating point numbers, and limits the possible accuracy of our algorithm. If you experimented with the tolerances with the saturation pressure solver, you would notice that it becomes impossible to move past an absolute tolerance of $\approx 1e-7$.
+# ╔═╡ edb4d079-373a-42a3-924c-df3e6d30152f
+begin
+	temperature_slider = @bind T1 Slider(370.0u"K":1.0u"K":420.0u"K", default=398.0u"K", show_value=true)
+	md"""Temperature =\
+	$temperature_slider"""
+end
 
-As our inputs are strictly positive numbers, one method of improving the conditioning of this matrix is by iterating using $\log(V)$.
+# ╔═╡ 082c59a1-e28b-41c4-8d39-b99f476bb12d
+# begin
+# 	Δg_mix(X) = mixing(model, p, T, X, gibbs_free_energy)/(R*T)
+# 	plot(title="benzene + toluene binary mixture\n",
+# 		ylabel="Δgₘᵢₓ/RT", xlabel="x, y (benzene)",
+# 		legendfont=font(10)
+# 	)
+# 	plot!(x_benzene, Δg_mix.(z_range))
+# 	plot!()
+# end
+
+# ╔═╡ b05e2123-3595-45db-8390-0d36ab6075f7
+md"""
+To describe this computationally, we describe the **tangent plane distance**. For a mixture of composition $\vec{z}$, the mixture can be said to be stable if the tangent plane distance is non-negative for any trial phase composition:
+
+$$\text{A mixture is stable} \iff TDP(\vec{x}) \geq 0$$
+
+Where the tangent plane distance is defined as
+
+$$TDP(p,T,\vec{z},\vec{x}) = \sum_i x_i(\mu_i(p,T,\vec{x}) - \mu_i(p,T,\vec{z}))$$
+
+To get started on implementing and visualising this, define a model using the Soave-Redlich-Kwong equation of state with methane and ethane:
 """
 
-# ╔═╡ d02f6d9f-3d3f-4ad0-949b-994e28866848
-let
-	function initial_jacobian_log(model, T, V0)
-		f(V) = sat_P_objective(model, T, exp.(V))
-		Jf(V) = ForwardDiff.jacobian(f, V)
-	return Jf(V0)
-	end
-	J0 = initial_jacobian_log(model, T, log.(V0))
-	try
-		@htl("""
-		<table>
-		<caption>Initial Jacobian using log(V)</caption>
-		  <tr>
-		    <td></td>
-		    <th>Liquid</th>
-		    <th>Vapour</th>
-		  </tr>
-		  <tr>
-		    <th>Pressure</th>
-		    <td>$(round(J0[1]; sigdigits=4))</td>
-		    <td>$(round(J0[3]; sigdigits=4))</td>
-		  </tr>
-		  <tr>
-			<th>Chemical potential</th>
-		    <td>$(round(J0[2]; sigdigits=4))</td>
-		    <td>$(round(J0[4]; sigdigits=4))</td>
-		  </tr>
-		</table>
-		<center>
-		<b>cond</b>(<i>J</i>) = $(round(cond(J0); sigdigits=4))
-		</center>
-		""")
-	catch
-	end
-end
+# ╔═╡ 81a77642-52ef-4836-9055-5059332f72d8
+#model = 
 
-# ╔═╡ e7213a7f-6261-4386-b807-4ba69d1d34a7
-md"""
-The main improvement, however, can come from properly scaling our equations to begin with. By dividing $f_1$ by $1e5$, we see a massive improvement to the condition number, and are able to converge our saturation solver to a tolerance of $\approx 1e-12$
-"""
+# ╔═╡ e97a1911-1af5-42f7-8996-64966711b829
 
-# ╔═╡ 5548c4cc-b82c-43bb-a8fc-82edd145452e
-let
-	function sat_P_objective_scaled(model, T, V)
-		Vl, Vv = V
-		P(V) = pressure(model, V, T)
-		μ(V) = Clapeyron.VT_chemical_potential(model, V, T)
-		f1 = (P(Vl) - P(Vv))/1e5
-		f2 = (μ(Vl) - μ(Vv))
-		return [f1, f2[1]]
-	end
-	
-	function initial_jacobian_log(model, T, V0)
-		f(V) = sat_P_objective_scaled(model, T, exp.(V))
-		Jf(V) = ForwardDiff.jacobian(f, V)
-		return Jf(V0)
-	end
-	
-	J0 = initial_jacobian_log(model, T, log.(V0))
-	try
-		@htl("""
-		<table>
-		<caption>Initial Jacobian using log(V)<br>and scaled equations</caption>
-		  <tr>
-		    <td></td>
-		    <th>Liquid</th>
-		    <th>Vapour</th>
-		  </tr>
-		  <tr>
-		    <th>Pressure</th>
-		    <td>$(round(J0[1]; sigdigits=4))</td>
-		    <td>$(round(J0[3]; sigdigits=4))</td>
-		  </tr>
-		  <tr>
-			<th>Chemical potential</th>
-		    <td>$(round(J0[2]; sigdigits=4))</td>
-		    <td>$(round(J0[4]; sigdigits=4))</td>
-		  </tr>
-		</table>
-		<center>
-		<b>cond</b>(<i>J</i>) = $(round(cond(J0); sigdigits=4))
-		</center>
-		""")
-	catch
-	end
-end
 
-# ╔═╡ 2ffa15ba-9c9c-4d9e-b154-08bb251d0749
-md"""
-## Building phase diagrams
-
-Now we are able to determine the location of the saturation curve, how do we build up a graph of the entire phase boundary? We can call the solver we just wrote above again and again for different temperatures with the same initial guess, and for most cases it will probably converge. However, as before there are a particular number of difficulties near the critical point and the solver can become very sensitive to the initial guesses. 
-
-To help with this, we can reuse each previous result as the new guess to the solver. 
-
-When building this, remember that the triple point is not represented by typical equations of state. The critical point, however, is.
-"""
-
-# ╔═╡ c5109b81-887a-46e6-92da-10bda0397380
-begin
-	# The vector of temperature values
-	T_vec = range(285.0, 647.3, length=1000)
-	# Preallocate our pressure and volume vectors
-	P_vec = zeros(length(T_vec))
-	Vl_vec = zeros(length(T_vec))
-	Vv_vec = zeros(length(T_vec))
-	
-	V02 = [2.26747e-5, 0.0320168]
-	for (i, T) in enumerate(T_vec)
-		# Fill in the routine to iteratively solve for the saturation envelope
-		
-		# Answer
-		try
-			sat = solve_sat_P(model, T, V02)
-			
-			if ~any(isnan.(sat))
-				(P_vec[i], Vl_vec[i], Vv_vec[i]) = sat
-				V02 = [Vl_vec[i], Vv_vec[i]]
-			end
-		catch
-			continue
-		end
-	end
-	T_vec = T_vec[.!iszero.(P_vec)]
-	filter!.(!iszero, [P_vec, Vl_vec, Vv_vec])
-end
-
-# ╔═╡ 1f218041-692c-4d1c-b873-39bdf7c45ccd
-begin
-	begin
-		plot(title="PT plot for water", xlabel="T (K)", ylabel="P (Pa)")
-		plot!(T_vec, P_vec, label="", linewidth=2)
-	end
-end
-
-# ╔═╡ 4981857e-e33a-43fa-b4f3-d32db350a4e2
-begin
-	plot(xaxis=:log, title="VT plot for water", xlabel="V (m³)", ylabel="T (K)")
-	plot!(Vl_vec, T_vec, label="liquid", linewidth=2)
-	plot!(Vv_vec, T_vec, label="vapour", linewidth=2)
-end
-
-# ╔═╡ 65a528b6-eebb-422c-9221-f2bd9df0d2d2
-md"""
-## Points of interest
-
-Above, we traced the pure saturation envelope between two user-decided points. If one of these falls above the critical point, the saturation solver will either fail or converge to a trivial solution. If we want to determine the end point of our saturation curve before beginning calculation, how should we go about that?
-
-For a cubic equation of state the critical temperature and pressure are an input to the EoS, meaning for a pure substance you will always know the critical point beforehand. This is not the case for other equations of state, meaning it must be solved for numerically.
-
-The conditions for the critical point in a pure substance are:
-
-$$\begin{gather}
-f_1(V_m, T) = \left(\frac{\partial P(V_m,T)}{\partial V_m}\right)_{T} = 0\\
-f_2(V_m, T) = \left(\frac{\partial^2 P(V_m,T)}{\partial V_m^2}\right)_{T} = 0\\
-\end{gather}$$
-
-This would usually require analytical derivatives, as calculation with finite differences are both inaccurate and expensive, especially for higher order derivatives. However, automatic differentiation allows us to easily determine the exact derivatives in the objective function, as well as the higher order derivatives needed to solve this with a Newton algorithm. Note that although solver methods that do not rely on derivatives exist, it is faster to use derivative information if it is available.
-
-Rather than write the entire solver by hand, we will now rely on the trust region Newton exported by the NLsolve library. The format of this function is:
-
-```julia
-nlsolve(f!, initial_x, autodiff = :forward, method = :trust_region)
-```
-
-Note that ``!`` signifies an [in-place function](https://en.wikipedia.org/wiki/In-place_algorithm). This means that rather than returning a value, it updates the first value passed to the new values.
-"""
-
-# ╔═╡ e1920171-2bd8-4806-887e-359a1799e55b
-# Vc, Tc = exp.(res.zero)
-
-# ╔═╡ 7bb4dc67-650a-4347-a4ad-9be4ae071dd5
-let
-	T = 373.0
-	V = 3e-4
-	P(V) = pressure(model, V, T)
-	f1(V) = ForwardDiff.derivative(P, V)
-	f2(V) = ForwardDiff.derivative(f1, V)
-	f1(V), f2(V)
-end
-
-# ╔═╡ 90ae8c3e-f393-4560-a10e-36ae95e76691
-model2 = PCSAFT(["water"])
-
-# ╔═╡ 6d67868c-4457-4820-800d-3a61f57f81a0
-begin
-	# Define our objective function
-	# Note the ! signifies this is an in-place function
-	function critical_objective!(model, F, x)
-		# V, T = x
-		V = exp10(x[1])
-		T = x[2]
-		# P(V) = pressure(model, V, T)
-		# f1(V) = ForwardDiff.derivative(P, V)
-		# f2(V) = ForwardDiff.derivative(f1, V)
-		A(V) = Clapeyron.eos(model, V, T)
-		f1(V) = ForwardDiff.derivative(A, V)
-		f2(V) = ForwardDiff.derivative(f1, V)
-		F .= [f1(V), f2(V)]
-	end
-
-	res = nlsolve((F, x) -> critical_objective!(model2, F, x), [log10(3e-4), 643.0], autodiff = :forward, ftol=1e-10)
-	# Vc, Tc = exp.(res.zero)
-end
-
-# ╔═╡ 60999090-756a-4e91-a8b3-227c8a4cd1e9
-begin
-    ∂²A∂V², ∂³A∂V³ = Clapeyron.∂²³f(model2, 5.43514e-5, 697.378, SA[1.0])
-	-∂²A∂V², -∂³A∂V³
-end
-
-# ╔═╡ 3c0e2fc1-ce8b-45b6-b6b2-e5b970a62a4f
-begin
-	F = [0.0, 0.0]
-	Clapeyron.obj_crit(model2, F, 697.378, 5.43514e-5)
-end
-
-# ╔═╡ 51565eae-ae18-472e-bb37-548656c5b35c
-res2 = nlsolve((F, x) -> Clapeyron.obj_crit(model2, F, x[1], x[2]), [695.0, 5.5e-4])
-
-# ╔═╡ 43678e66-5361-4725-9802-d3e4e11e46a8
-Clapeyron.obj_crit(model2, F, 10.29221811917571, 321.5464072360518)
-
-# ╔═╡ c9251f8a-b7c8-44d7-bda8-19c544a9df23
-crit_pure(model2)
-
-# ╔═╡ c76a0c80-4a2b-4f34-ad7e-6b8cc4dad5a7
-crit_pure(model)
-
-# ╔═╡ 18f53692-50ab-4d2d-80dd-00d169fae340
-html"<br><br><br><br><br><br><br><br><br><br><br><br>"
-
-# ╔═╡ 365198f5-80d9-4ac1-adff-47a690cc9b4a
+# ╔═╡ 5ed26e66-7c4b-466a-b95d-90c283aac6c6
 md"## Function library
 
 Just some helper functions used in the notebook."
 
-# ╔═╡ e5f39d39-c08e-4199-9952-119f21d13612
-function acentric_factor(pure)
-	Tc,pc,_ = crit_pure(pure)
-	ps = first(saturation_pressure(pure,0.7*Tc))
-	ω = -log10(ps/pc) - 1.0
-	return ω
-end
-
-# ╔═╡ 33ed3f41-3107-4497-85e0-aa7de6686612
+# ╔═╡ b0429aaf-cdf4-487f-972e-8761f77cc0ad
 hint(text) = Markdown.MD(Markdown.Admonition("hint", "Hint", [text]))
 
-# ╔═╡ bb419121-16b9-4344-b245-3e19f8d4830a
+# ╔═╡ b4939d68-71e4-480a-9c07-f1a6db51bb8b
 almost(text) = Markdown.MD(Markdown.Admonition("warning", "Almost there!", [text]))
 
-# ╔═╡ bb4b3b1b-702b-4462-967d-2d25bfe3f226
+# ╔═╡ dc6f6cb6-90df-453f-ba95-9542d81908ea
 still_missing(text=md"Replace `missing` with your answer.") = Markdown.MD(Markdown.Admonition("warning", "Here we go!", [text]))
 
-# ╔═╡ 7c415b6a-cb43-4d7e-8a5f-76a0e510cabd
+# ╔═╡ b05f3f59-434d-4c94-9393-d4683e27410e
 keep_working(text=md"The answer is not quite right.") = Markdown.MD(Markdown.Admonition("danger", "Keep working on it!", [text]))
 
-# ╔═╡ f7066d86-00f8-441f-868b-7c94037b36ac
+# ╔═╡ 888a61a9-9b5e-41d6-bba5-ce259ecca3f5
 yays = [md"Fantastic!", md"Splendid!", md"Great!", md"Yay ❤", md"Great! 🎉", md"Well done!", md"Keep it up!", md"Good job!", md"Awesome!", md"You got the right answer!", md"Let's move on to the next section."]
 
-# ╔═╡ 02759a14-8161-4332-b960-3d3a5f052d19
+# ╔═╡ b90ae8a7-5746-47a4-b182-90f2e8ad19c5
 correct(text=rand(yays)) = Markdown.MD(Markdown.Admonition("correct", "Got it!", [text]))
 
-# ╔═╡ a676acf4-e167-425c-b63e-9c9fb8c24d13
-not_defined(variable_name) = Markdown.MD(Markdown.Admonition("danger", "Oopsie!", [md"Make sure that you define **$(Markdown.Code(string(variable_name)))**"]))
+# ╔═╡ ef150bc3-65a1-4695-a1dc-ef8a2e602a5a
+not_defined(variable_name) = Markdown.MD(Markdown.Admonition("danger", "Oopsie!", [md"Make sure that you define a variable called **$(Markdown.Code(string(variable_name)))**"]))
 
-# ╔═╡ 642da62e-9369-4b4b-b747-390243ec7103
-function data_table(headers, names, values)
-	app_id = randstring('a':'z')
-	data = JSON2.write(Dict(
-	    "headers" => [Dict("text" => headers[1], "value" => "const"), Dict("text" => headers[2], "value" => "val")],
-	    "states" => [Dict("const" => name, "val" => values[idx]) for (idx, name) in enumerate(names)]
-	))
-	return HTML("""
-		<link href="https://cdn.jsdelivr.net/npm/@mdi/font@5.x/css/materialdesignicons.min.css" rel="stylesheet">
-		<link href="https://cdn.jsdelivr.net/npm/vuetify@2.x/dist/vuetify.min.css" rel="stylesheet">
+# ╔═╡ 64259d11-1310-49b6-aaec-bfe9832847fa
+if !@isdefined(model)
+	not_defined(:model)
+else
+	let
+		if !(model isa EoSModel)
+			still_missing(md"Make sure to define `model` using Clapeyron")
+			
+		elseif (model isa RK) && (issetequal(model.components, ["methane", "ethane"])) && (model.alpha isa SoaveAlpha)
+			correct()
+			
+		else
+			md"""
+			!!! warning "Incorrect"
+				Make sure to define `model` using `SRK`
+			"""
+		end
+	end
+end
 
-	  <div id=$app_id>
-		<v-app>
-		  <v-data-table
-		  :headers="headers"
-		  :items="states"
-		></v-data-table>
-		</v-app>
-	  </div>
+# ╔═╡ 86e10ead-c665-4cb1-9956-b700968bee7f
+tangent_line(f, x₀) = (x -> f(x₀) + ForwardDiff.derivative(f, x₀)*(x-x₀))
 
-	  <script src="https://cdn.jsdelivr.net/npm/vue@2.x/dist/vue.js"></script>
-	  <script src="https://cdn.jsdelivr.net/npm/vuetify@2.x/dist/vuetify.js"></script>
+# ╔═╡ 434c55a1-55f3-486f-895c-67969b042143
+begin
+	R = 8.314
+	p = ustrip(p1)*1e5
+	T = ustrip(T1)
 	
-	<script>
-		new Vue({
-		  el: $app_id,
-		  vuetify: new Vuetify(),
-		  data () {
-				return $data
-			}
-		})
-	</script>
-	<style>
-		.v-application--wrap {
-			min-height: 10vh;
-		}
-		.v-data-footer__select {
-			display: none;
-		}
-	</style>
-	""")
-end
+	# Make sure to operate in reduced variables!
+	gⱽ(z) = gibbs_free_energy(model, p, T, z; phase=:vapour, threaded=false)./(R*T)
+	gᴸ(z) = gibbs_free_energy(model, p, T, z; phase=:liquid, threaded=false)./(R*T)
 
-# ╔═╡ b52f84b1-1458-4ec2-8f8b-f94e96940480
-# begin
-# 	headers = ["Variable", "Value"]
-# 	names = ["c₁", "c₂", "c₃"]
-# 	values = ["1.0", "2.0", "3.0"]
-# 	data_table(headers, names, values)
-# end
+	# Univariate root finding for finding the exact intersection
+	intersect = find_zero(z -> gⱽ([z, 1-z])-gᴸ([z, 1-z]), [1e-3, 1.0-1e-3])
+	
+	# Describe our objective function for stability analysis
+	# Note tm() is formulated to operate on mole numbers rather than mole fractions hence the use of W, Z
+	φ(x) = fugacity_coefficient(model, p ,T, x; threaded=false)
+	d(x) = log.(x) .+ log.(φ(x))
+	tm(W,Z) = 1.0 + sum(W.*(d(W) .- d(Z) .- 1.0))
 
-# ╔═╡ e799ebf3-55ca-4b9a-b1dd-6009b90bd4ec
-function latex_table(headers, names, values) # TODO: Make this work on input lists?
-	str1 = join([L"&"*h for h in headers])
-	str2 = join([names[i]*"&"*values[i]*"\\" for i in range(1,length(zip(names, values)))])
+	z = (x -> [x, 1-x])(0.2)
+	tm_obj(W) = tm(exp10.(W), z) # log space objective function
+	
+	res = optimize(tm_obj, log10.([0.1, 0.9]), f_tol=1e-3, autodiff=:forward, method=Newton())
+	tm_xmin = normalize(exp10.(Optim.minimizer(res)), 1)
+	tm_min = Optim.minimum(res)
 
-	return Markdown.parse(L"$\begin{array}{lc}\hline"*str1*L"\\\hline"*str2*L"\hline\end{array}$")
-	# return md"""
-	# $\begin{array}{lcc}
-	# \hline & \text { Treatment A } & \text { Treatment B } \\
-	# \hline \text { John Smith } & 1 & 2 \\
-	# \text { Jane Doe } & - & 3 \\
-	# \text { Mary Johnson } & 4 & 5 \\
-	# \hline
-	# \end{array}$
-	# """
-end
+	x_tangent = zeros(2)
+	x_tangent[1] = tm_xmin[1]
+	# Returns function describing our tangent plane
+	tangent_plane = tangent_line(x -> gᴸ([x, 1-x]), tm_xmin[1])
 
-# ╔═╡ a1f47444-5aa6-4ffe-aad3-2571ff774d13
-md"""
-$\begin{array}{lc}
-\hline \text{Variable} & \text { Value } \\
-\hline \delta_1 & 0 \\
-\delta_2 & 0 \\
-\alpha(T) & 1 \\
-\hline
-\end{array}$
-"""
+	# g_tangent = zeros(2)
+	# g_tangent[1] = gᴸ([x_tangent[1], 1-x_tangent[1]])
+	# g_tangent[2] = gⱽ([x_tangent[2], 1-x_tangent[2]])
 
-# ╔═╡ 512804d7-8fad-43c1-919a-468640bdcde5
-function reduce_complex(Zvec)
-	Zvec = Vector{Union{Float64, ComplexF64}}(Zvec)
-	Zvec[abs.(imag.(Zvec)) .< eps()] .= real(Zvec[abs.(imag.(Zvec)) .< eps()])
+		# plot(title="The Rachford-Rice equation", xlabel="β", ylabel="f(β)", framestyle=:box, xlim=(βmin, βmax), ylim=(-4, 4), tick_direction=:out, grid=:off)
+
+	plot(title="Tangent plane construction for a\nbenzene + toluene binary mixture",
+		ylabel="gₘ/RT", xlabel="x, y (benzene)", legendfont=font(10), framestyle=:box, tick_direction=:out, grid=:off
+	)
+	
+	x_range = range(0.05, 0.3, 100)
+	z_range = [[x, 1-x] for x in x_range]
+	x1_range = range(0+1e-5, intersect, 100)
+	z1_range = [[x, 1-x] for x in x1_range]
+	x2_range = range(intersect, 1-1e-5, 100)
+	z2_range = [[x, 1-x] for x in x2_range]
+	plot!(x_range, gᴸ.(z_range), label="liquid", linewidth=2)
+	plot!(x_range, gⱽ.(z_range), label="vapour", linewidth=2)
+	# plot!(tm_xmin, g_xmin, label="tangent plane", line=(:dash, 2))
+	plot!(x_range, tangent_plane.(x_range), label="tangent plane", linewidth=2)
+	scatter!([intersect], [gᴸ([intersect, 1-intersect])], markershape=:diamond, label="")
+	# vline!([z[1]], label="z=$(round(z[1]; digits=3))")
+	# vline!([tm_xmin[1]], label="x=$(round(tm_xmin[1]; digits=3))")
+	# plot!(x_tangent, g_tangent, label="tangent plane", line=(:dash, 2))
+	plot!(legend=:best)
 end
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
@@ -559,28 +197,23 @@ PLUTO_PROJECT_TOML_CONTENTS = """
 [deps]
 Clapeyron = "7c7805af-46cc-48c9-995b-ed0ed2dc909a"
 ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
-HypertextLiteral = "ac1192a8-f4b3-4bfe-ba22-af5b92cd3ab2"
 LaTeXStrings = "b964fa9f-0449-5b57-a5c2-d3ea65f4040f"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
-NLsolve = "2774e3e8-f4cf-5e23-947b-6d7e65073b56"
+Optim = "429524aa-4258-5aef-a3af-852621145aeb"
 Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
-PolynomialRoots = "3a141323-8675-5d76-9d11-e1df1406c778"
-Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+PlutoUI = "7f904dfe-b85e-4ff6-b463-dae2292396a8"
 Roots = "f2b01f46-fcfa-551c-844a-d8ac1e96c665"
-ShortCodes = "f62ebe17-55c5-4640-972f-b59c0dd11ccf"
-StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [compat]
 Clapeyron = "~0.3.6"
 ForwardDiff = "~0.10.30"
-HypertextLiteral = "~0.9.4"
 LaTeXStrings = "~1.3.0"
-NLsolve = "~4.5.1"
-Plots = "~1.31.1"
-PolynomialRoots = "~1.0.0"
+Optim = "~1.7.0"
+Plots = "~1.30.1"
+PlutoUI = "~0.7.39"
 Roots = "~2.0.1"
-ShortCodes = "~0.3.3"
-StaticArrays = "~1.5.0"
+Unitful = "~1.11.0"
 """
 
 # ╔═╡ 00000000-0000-0000-0000-000000000002
@@ -589,6 +222,12 @@ PLUTO_MANIFEST_TOML_CONTENTS = """
 
 julia_version = "1.7.2"
 manifest_format = "2.0"
+
+[[deps.AbstractPlutoDingetjes]]
+deps = ["Pkg"]
+git-tree-sha1 = "8eaf9f1b4921132a4cff3f36a1d9ba923b14a481"
+uuid = "6e696c72-6542-2067-7265-42206c756150"
+version = "1.1.4"
 
 [[deps.Adapt]]
 deps = ["LinearAlgebra"]
@@ -601,9 +240,9 @@ uuid = "0dad84c5-d112-42e6-8d28-ef12dabb789f"
 
 [[deps.ArrayInterfaceCore]]
 deps = ["LinearAlgebra", "SparseArrays", "SuiteSparse"]
-git-tree-sha1 = "5e732808bcf7bbf730e810a9eaafc52705b38bb5"
+git-tree-sha1 = "d618d3cf75e8ed5064670e939289698ecf426c7f"
 uuid = "30b0a656-2188-435a-8636-2ec0e6a096e2"
-version = "0.1.13"
+version = "0.1.12"
 
 [[deps.Artifacts]]
 uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
@@ -672,9 +311,9 @@ version = "0.7.0"
 
 [[deps.ColorSchemes]]
 deps = ["ColorTypes", "ColorVectorSpace", "Colors", "FixedPointNumbers", "Random"]
-git-tree-sha1 = "1fd869cc3875b57347f7027521f561cf46d1fcd8"
+git-tree-sha1 = "7297381ccb5df764549818d9a7d57e45f1057d30"
 uuid = "35d6a980-a343-548e-a6ea-1d62b119f2f4"
-version = "3.19.0"
+version = "3.18.0"
 
 [[deps.ColorTypes]]
 deps = ["FixedPointNumbers", "Random"]
@@ -768,12 +407,6 @@ deps = ["IrrationalConstants", "LogExpFunctions", "NaNMath", "Random", "SpecialF
 git-tree-sha1 = "28d605d9a0ac17118fe2c5e9ce0fbb76c3ceb120"
 uuid = "b552c78f-8df3-52c6-915a-8e097449b14b"
 version = "1.11.0"
-
-[[deps.Distances]]
-deps = ["LinearAlgebra", "SparseArrays", "Statistics", "StatsAPI"]
-git-tree-sha1 = "3258d0659f812acde79e8a74b11f17ac06d0ca04"
-uuid = "b4f34e82-e78d-54a5-968a-f98e89d6e8f7"
-version = "0.10.7"
 
 [[deps.Distributed]]
 deps = ["Random", "Serialization", "Sockets"]
@@ -948,11 +581,23 @@ git-tree-sha1 = "cb7099a0109939f16a4d3b572ba8396b1f6c7c31"
 uuid = "34004b35-14d8-5ef3-9330-4cdb6864b03a"
 version = "0.3.10"
 
+[[deps.Hyperscript]]
+deps = ["Test"]
+git-tree-sha1 = "8d511d5b81240fc8e6802386302675bdf47737b9"
+uuid = "47d2ed2b-36de-50cf-bf87-49c2cf4b8b91"
+version = "0.0.4"
+
 [[deps.HypertextLiteral]]
 deps = ["Tricks"]
 git-tree-sha1 = "c47c5fa4c5308f27ccaac35504858d8914e102f9"
 uuid = "ac1192a8-f4b3-4bfe-ba22-af5b92cd3ab2"
 version = "0.9.4"
+
+[[deps.IOCapture]]
+deps = ["Logging", "Random"]
+git-tree-sha1 = "f7be53659ab06ddc986428d3a9dcc95f6fa6705a"
+uuid = "b5f81e59-6552-4d32-b1f0-c071b021bf89"
+version = "0.2.2"
 
 [[deps.IniFile]]
 git-tree-sha1 = "f550e6e32074c939295eb5ea6de31849ac2c9625"
@@ -1007,12 +652,6 @@ deps = ["Dates", "Mmap", "Parsers", "Unicode"]
 git-tree-sha1 = "3c837543ddb02250ef42f4738347454f95079d4e"
 uuid = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 version = "0.21.3"
-
-[[deps.JSON3]]
-deps = ["Dates", "Mmap", "Parsers", "StructTypes", "UUIDs"]
-git-tree-sha1 = "fd6f0cae36f42525567108a42c1c674af2ac620d"
-uuid = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
-version = "1.9.5"
 
 [[deps.JpegTurbo_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
@@ -1160,12 +799,6 @@ git-tree-sha1 = "e498ddeee6f9fdb4551ce855a46f54dbd900245f"
 uuid = "442fdcdd-2543-5da2-b0f3-8c86c306513e"
 version = "0.3.1"
 
-[[deps.Memoize]]
-deps = ["MacroTools"]
-git-tree-sha1 = "2b1dfcba103de714d31c033b5dacc2e4a12c7caa"
-uuid = "c03570c3-d221-55d1-a50c-7939bbd78826"
-version = "0.4.4"
-
 [[deps.Missings]]
 deps = ["DataAPI"]
 git-tree-sha1 = "bf210ce90b6c9eed32d25dbcae1ebc565df2687f"
@@ -1189,12 +822,6 @@ deps = ["DiffResults", "Distributed", "FiniteDiff", "ForwardDiff"]
 git-tree-sha1 = "50310f934e55e5ca3912fb941dec199b49ca9b68"
 uuid = "d41bc354-129a-5804-8e4c-c37616107c6c"
 version = "7.8.2"
-
-[[deps.NLsolve]]
-deps = ["Distances", "LineSearches", "LinearAlgebra", "NLSolversBase", "Printf", "Reexport"]
-git-tree-sha1 = "019f12e9a1a7880459d0173c182e6a99365d7ac1"
-uuid = "2774e3e8-f4cf-5e23-947b-6d7e65073b56"
-version = "4.5.1"
 
 [[deps.NaNMath]]
 git-tree-sha1 = "b086b7ea07f8e38cf122f5016af580881ac914fe"
@@ -1220,15 +847,21 @@ uuid = "05823500-19ac-5b8b-9628-191a04bc5112"
 
 [[deps.OpenSSL_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
-git-tree-sha1 = "9a36165cf84cff35851809a40a928e1103702013"
+git-tree-sha1 = "ab05aa4cc89736e95915b01e7279e61b1bfe33b8"
 uuid = "458c3c95-2e84-50aa-8efc-19380b2a3a95"
-version = "1.1.16+0"
+version = "1.1.14+0"
 
 [[deps.OpenSpecFun_jll]]
 deps = ["Artifacts", "CompilerSupportLibraries_jll", "JLLWrappers", "Libdl", "Pkg"]
 git-tree-sha1 = "13652491f6856acfd2db29360e1bbcd4565d04f1"
 uuid = "efe28fd5-8261-553b-a9e1-b2916fc3738e"
 version = "0.5.5+0"
+
+[[deps.Optim]]
+deps = ["Compat", "FillArrays", "ForwardDiff", "LineSearches", "LinearAlgebra", "NLSolversBase", "NaNMath", "Parameters", "PositiveFactorizations", "Printf", "SparseArrays", "StatsBase"]
+git-tree-sha1 = "7a28efc8e34d5df89fc87343318b0a8add2c4021"
+uuid = "429524aa-4258-5aef-a3af-852621145aeb"
+version = "1.7.0"
 
 [[deps.Opus_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
@@ -1288,20 +921,21 @@ version = "3.0.0"
 
 [[deps.PlotUtils]]
 deps = ["ColorSchemes", "Colors", "Dates", "Printf", "Random", "Reexport", "Statistics"]
-git-tree-sha1 = "9888e59493658e476d3073f1ce24348bdc086660"
+git-tree-sha1 = "bb16469fd5224100e422f0b027d26c5a25de1200"
 uuid = "995b91a9-d308-5afd-9ec6-746e21dbc043"
-version = "1.3.0"
+version = "1.2.0"
 
 [[deps.Plots]]
 deps = ["Base64", "Contour", "Dates", "Downloads", "FFMPEG", "FixedPointNumbers", "GR", "GeometryBasics", "JSON", "Latexify", "LinearAlgebra", "Measures", "NaNMath", "Pkg", "PlotThemes", "PlotUtils", "Printf", "REPL", "Random", "RecipesBase", "RecipesPipeline", "Reexport", "Requires", "Scratch", "Showoff", "SparseArrays", "Statistics", "StatsBase", "UUIDs", "UnicodeFun", "Unzip"]
-git-tree-sha1 = "93e82cebd5b25eb33068570e3f63a86be16955be"
+git-tree-sha1 = "2402dffcbc5bb1631fb4f10cb5c3698acdce29ea"
 uuid = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
-version = "1.31.1"
+version = "1.30.1"
 
-[[deps.PolynomialRoots]]
-git-tree-sha1 = "5f807b5345093487f733e520a1b7395ee9324825"
-uuid = "3a141323-8675-5d76-9d11-e1df1406c778"
-version = "1.0.0"
+[[deps.PlutoUI]]
+deps = ["AbstractPlutoDingetjes", "Base64", "ColorTypes", "Dates", "Hyperscript", "HypertextLiteral", "IOCapture", "InteractiveUtils", "JSON", "Logging", "Markdown", "Random", "Reexport", "UUIDs"]
+git-tree-sha1 = "8d1f54886b9037091edf146b517989fc4a09efec"
+uuid = "7f904dfe-b85e-4ff6-b463-dae2292396a8"
+version = "0.7.39"
 
 [[deps.PooledArrays]]
 deps = ["DataAPI", "Future"]
@@ -1419,12 +1053,6 @@ version = "0.8.2"
 deps = ["Distributed", "Mmap", "Random", "Serialization"]
 uuid = "1a1011a3-84de-559e-8e89-a11a2f7dc383"
 
-[[deps.ShortCodes]]
-deps = ["Base64", "CodecZlib", "HTTP", "JSON3", "Memoize", "UUIDs"]
-git-tree-sha1 = "0fcc38215160e0a964e9b0f0c25dcca3b2112ad1"
-uuid = "f62ebe17-55c5-4640-972f-b59c0dd11ccf"
-version = "0.3.3"
-
 [[deps.Showoff]]
 deps = ["Dates", "Grisu"]
 git-tree-sha1 = "91eddf657aca81df9ae6ceb20b959ae5653ad1de"
@@ -1456,15 +1084,10 @@ uuid = "276daf66-3868-5448-9aa4-cd146d93841b"
 version = "2.1.6"
 
 [[deps.StaticArrays]]
-deps = ["LinearAlgebra", "Random", "StaticArraysCore", "Statistics"]
-git-tree-sha1 = "9f8a5dc5944dc7fbbe6eb4180660935653b0a9d9"
+deps = ["LinearAlgebra", "Random", "Statistics"]
+git-tree-sha1 = "2bbd9f2e40afd197a1379aef05e0d85dba649951"
 uuid = "90137ffa-7385-5640-81b9-e52037218182"
-version = "1.5.0"
-
-[[deps.StaticArraysCore]]
-git-tree-sha1 = "6edcea211d224fa551ec8a85debdc6d732f155dc"
-uuid = "1e83bf80-4336-4d27-bf5d-d5a4f845583c"
-version = "1.0.0"
+version = "1.4.7"
 
 [[deps.Statistics]]
 deps = ["LinearAlgebra", "SparseArrays"]
@@ -1478,9 +1101,9 @@ version = "1.4.0"
 
 [[deps.StatsBase]]
 deps = ["DataAPI", "DataStructures", "LinearAlgebra", "LogExpFunctions", "Missings", "Printf", "Random", "SortingAlgorithms", "SparseArrays", "Statistics", "StatsAPI"]
-git-tree-sha1 = "642f08bf9ff9e39ccc7b710b2eb9a24971b52b1a"
+git-tree-sha1 = "8977b17906b0a1cc74ab2e3a05faa16cf08a8291"
 uuid = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
-version = "0.33.17"
+version = "0.33.16"
 
 [[deps.StatsFuns]]
 deps = ["ChainRulesCore", "HypergeometricFunctions", "InverseFunctions", "IrrationalConstants", "LogExpFunctions", "Reexport", "Rmath", "SpecialFunctions"]
@@ -1490,15 +1113,9 @@ version = "1.0.1"
 
 [[deps.StructArrays]]
 deps = ["Adapt", "DataAPI", "StaticArrays", "Tables"]
-git-tree-sha1 = "55ef24d228f9396fa9e2317eb60c953b8cec1ae7"
+git-tree-sha1 = "9abba8f8fb8458e9adf07c8a2377a070674a24f1"
 uuid = "09ab397b-f2b6-538f-b94a-2f83cf4a842a"
-version = "0.6.10"
-
-[[deps.StructTypes]]
-deps = ["Dates", "UUIDs"]
-git-tree-sha1 = "d24a825a95a6d98c385001212dc9020d609f2d4f"
-uuid = "856f2bd8-1eba-4b0a-8007-ebc267875bd4"
-version = "1.8.1"
+version = "0.6.8"
 
 [[deps.SuiteSparse]]
 deps = ["Libdl", "LinearAlgebra", "Serialization", "SparseArrays"]
@@ -1807,49 +1424,26 @@ version = "0.9.1+5"
 """
 
 # ╔═╡ Cell order:
-# ╟─58b0aaa8-f47a-11ec-1113-9933151340be
-# ╟─c4b5bc07-7f17-47d2-a3e6-945813e29b35
-# ╠═de8d6589-dbee-4577-a347-6a4f24c0447c
-# ╠═94e20664-95f2-4760-9bc4-b81df13328dc
-# ╠═fe3c0403-5447-4171-a536-5996cc11c77d
-# ╠═03a0b678-0ad6-4c5a-b1d8-6497c9703ccb
-# ╟─5f81ba8b-b7db-4571-b797-1a4ea06fa9a7
-# ╟─685d5cc5-bda8-4033-a984-52e891e93caa
-# ╟─4e55e0f7-31f2-460d-8a44-8f6ff80b1ac2
-# ╟─ac60df8f-b66b-40fb-8c80-c1d9029c3753
-# ╟─d02f6d9f-3d3f-4ad0-949b-994e28866848
-# ╟─e7213a7f-6261-4386-b807-4ba69d1d34a7
-# ╟─5548c4cc-b82c-43bb-a8fc-82edd145452e
-# ╟─2ffa15ba-9c9c-4d9e-b154-08bb251d0749
-# ╠═c5109b81-887a-46e6-92da-10bda0397380
-# ╟─1f218041-692c-4d1c-b873-39bdf7c45ccd
-# ╟─4981857e-e33a-43fa-b4f3-d32db350a4e2
-# ╟─65a528b6-eebb-422c-9221-f2bd9df0d2d2
-# ╠═6d67868c-4457-4820-800d-3a61f57f81a0
-# ╠═e1920171-2bd8-4806-887e-359a1799e55b
-# ╠═7bb4dc67-650a-4347-a4ad-9be4ae071dd5
-# ╠═e77e09f5-ce3c-4653-81a3-c252a5fb8793
-# ╠═90ae8c3e-f393-4560-a10e-36ae95e76691
-# ╠═60999090-756a-4e91-a8b3-227c8a4cd1e9
-# ╠═3c0e2fc1-ce8b-45b6-b6b2-e5b970a62a4f
-# ╠═51565eae-ae18-472e-bb37-548656c5b35c
-# ╠═43678e66-5361-4725-9802-d3e4e11e46a8
-# ╠═c9251f8a-b7c8-44d7-bda8-19c544a9df23
-# ╠═c76a0c80-4a2b-4f34-ad7e-6b8cc4dad5a7
-# ╟─18f53692-50ab-4d2d-80dd-00d169fae340
-# ╟─365198f5-80d9-4ac1-adff-47a690cc9b4a
-# ╟─e5f39d39-c08e-4199-9952-119f21d13612
-# ╟─33ed3f41-3107-4497-85e0-aa7de6686612
-# ╟─bb419121-16b9-4344-b245-3e19f8d4830a
-# ╟─bb4b3b1b-702b-4462-967d-2d25bfe3f226
-# ╟─7c415b6a-cb43-4d7e-8a5f-76a0e510cabd
-# ╟─f7066d86-00f8-441f-868b-7c94037b36ac
-# ╟─02759a14-8161-4332-b960-3d3a5f052d19
-# ╟─a676acf4-e167-425c-b63e-9c9fb8c24d13
-# ╟─642da62e-9369-4b4b-b747-390243ec7103
-# ╟─b52f84b1-1458-4ec2-8f8b-f94e96940480
-# ╟─e799ebf3-55ca-4b9a-b1dd-6009b90bd4ec
-# ╟─a1f47444-5aa6-4ffe-aad3-2571ff774d13
-# ╟─512804d7-8fad-43c1-919a-468640bdcde5
+# ╟─a598b2d2-f15c-11ec-10ed-a15ca6a73a60
+# ╟─04089557-9381-4bbb-9882-45b5a685694b
+# ╠═a264538b-fd99-46c7-9e7b-5a98b7bba679
+# ╟─2cae3aeb-696a-4e82-ae5a-da00221fec81
+# ╟─fdd147c7-10d0-4f28-857f-342f070333f0
+# ╟─edb4d079-373a-42a3-924c-df3e6d30152f
+# ╟─434c55a1-55f3-486f-895c-67969b042143
+# ╟─082c59a1-e28b-41c4-8d39-b99f476bb12d
+# ╟─b05e2123-3595-45db-8390-0d36ab6075f7
+# ╠═81a77642-52ef-4836-9055-5059332f72d8
+# ╟─64259d11-1310-49b6-aaec-bfe9832847fa
+# ╠═e97a1911-1af5-42f7-8996-64966711b829
+# ╟─5ed26e66-7c4b-466a-b95d-90c283aac6c6
+# ╟─b0429aaf-cdf4-487f-972e-8761f77cc0ad
+# ╟─b4939d68-71e4-480a-9c07-f1a6db51bb8b
+# ╠═dc6f6cb6-90df-453f-ba95-9542d81908ea
+# ╟─b05f3f59-434d-4c94-9393-d4683e27410e
+# ╟─888a61a9-9b5e-41d6-bba5-ce259ecca3f5
+# ╟─b90ae8a7-5746-47a4-b182-90f2e8ad19c5
+# ╟─ef150bc3-65a1-4695-a1dc-ef8a2e602a5a
+# ╠═86e10ead-c665-4cb1-9956-b700968bee7f
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002

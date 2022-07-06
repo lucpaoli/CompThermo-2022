@@ -1,113 +1,534 @@
 ### A Pluto.jl notebook ###
-# v0.19.8
+# v0.19.9
 
 using Markdown
 using InteractiveUtils
 
 # ╔═╡ 23962934-2638-4788-9677-ae42245801ec
 begin
-	using Clapeyron, ForwardDiff, Roots, Optim, LinearAlgebra, PolynomialRoots # Numerical packages
-	using LaTeXStrings, Plots, ShortCodes, Printf # Display and plotting
+	using Clapeyron, ForwardDiff, Roots, LinearAlgebra, NLsolve # Numerical packages
+	using LaTeXStrings, Plots, ShortCodes # Display and plotting
 	using HypertextLiteral
-	# using JSON2, Tables,Random # Data handling
 end
 
 # ╔═╡ 30f48408-f16e-11ec-3d6b-650f1bf7f435
 md"""
-### Section 3.1
-# 	Volume Solvers
+### Section 3.3
+# The Flash Problem
 
-Now we know how to choose an equation of state for different situations, we need to investigate how to obtain the fluid properties at a specified state. To start with, we will look at how to solve for the volume at a given pressure, temperature, and phase for a pure fluid. From there, we will see how this changes when the phase is not known beforehand, and when dealing with a multicomponent mixture.
+The flash problem refers to knowing **when** a fluid will undergo a phase split, **how many phases** the fluid will split into, and the **composition** of each phase. We use these calculations all across chemical engineering, particularly in separation processes. For example, these are used when modelling flash drums, distillation columns and liquid-liquid extraction. They are also required when simulating petroleum reservoirs and other complex liquid flow.
 
-Mathematically, this problem can be written as solving
+## Key concepts
 
-$$P(V,T_0,\vec{z}) = P_0$$
+Before we begin, there are a few important ideas and equations we should mention.
 
-for all values of $V$.
+### Chemical equilibrium 
 
-## Pure fluids
-### Cubic EoS
+At equilibrium, we have the **equivalence of chemical potential**, so that for a mixture with $C$ components and $P$ phases $(\alpha, \beta, \dots, P)$ we have an equivalence relation for every component _i_ in _C_:
 
-As you have seen in section 2, the general cubic equation of state can be written as
+$$\mu_i^\alpha = \mu_i^\beta = \dots = \mu_i^P$$
 
-$$P = \frac{RT}{v-b} - \frac{a\alpha(T)}{(v + \delta_1 b)(v + \delta_2b)}$$
+Identically, we have the **equivalent of fugacity**:
 
-where the values of $\delta_1, \delta_2$ are specific to each equation of state (van der Waals, Peng Robinson, Redlich Kwong), and the form of the **alpha function**, $a(T)$, can be selected to match specific types of components or problems. In this workbook we will consider the van der Waals EoS, which is the case when 
+$$f_i^\alpha = f_i^\beta = \dots = f_i^P$$
 
-$$\delta_1 = \delta_2 = 0$$
-$$\alpha(T) = 1$$
+We can express the compositions at vapour liquid equilibrium (VLE) using **K factors**. These represent the distribution of each component between phases.
+
+$$K_i = \frac{y_i}{x_i}$$
+
+Using the equality of fugacity, we can also express this in terms of the fugacity coefficient
+
+$$\begin{align}
+f_i^L &= x_i \varphi_i^L P\\
+f_i^V &= y_i \varphi_i^V P\\
+x_i \varphi_i^L \cancel{P} &= y_i \varphi_i^V \cancel{P}\\
+K_i &= \frac{\varphi_i^L}{\varphi_i^V}
+\end{align}$$
+
+### The "trivial solution"
+
+In flash problems we run the risk of converging to the so-called trivial solution. This is where each phase is identical, meaning the equality of chemical potential is inherently satisfied. In a situation where we know there should be a 2-phase region, it can be hard to avoid converging to this solution.
+
+### Mole numbers
+
+In these problems, it is often advantageous to work using **mole numbers** in place of mole fractions. Mole numbers refers to the number of moles present, and isn't normalised to 1 like mole fractions. This is useful as it allows us to consider the problem using _unconstrained minimisation_, where we are not required to keep all mole fractions summing to 1.
+
+
 """
 
-# ╔═╡ 2f3a7b9d-3dac-4e12-abb1-ce09cef36e93
+# ╔═╡ 09dae921-9730-48a0-94b0-dd825d0ed919
 md"""
-Giving us
+## The Rachford-Rice equation
 
-$$P = \frac{RT}{v-b} - \frac{a}{v^2}$$
+For the case where we have **composition independent** K values and a suspected 2-phase region, we can solve for the phase compositions and distribution using just material balances. 
+
+$$\begin{align}
+z_i F &= x_i L + y_i V\\
+z_i ()
+z_i &= x_i (1-\beta) + y_i \beta\\
+\frac{z_i}{x_i} &= 1-\beta + K_i \beta\\
+x_i &= \frac{z_i}{1+\beta(K_i - 1)}\\
+y_i &= K_i x_i = \frac{K_iz_i}{1+\beta(K_i - 1)}
+\end{align}$$
+
+where $\beta$ is the *vapour fraction*, expressed as
+
+$$\beta = \frac{L}{V}$$
+
+Since mole fractions sum to one,
+
+$$\sum x_i = \sum y_i = 1$$
+
+we can subtract each equation from each other to obtain our objective function, the Rachford-Rice equation.
+
+$$f(\beta) = \sum_i^{N_c} \frac{(K_i - 1)z_i}{1 + \beta(K_i - 1)} = 0$$
+
+This formulation carries a few advantages over the other possible formulations. It **monotonic** and has easily obtainable analytical derivatives. When $K_i$ is known, it is then a univariate equation in $\beta$ easily solvable in a variety of ways. As the derivative is simple and the function monotonic, our preferred method in this course will be a **step limited Newton method**.
+"""
+
+# ╔═╡ f20d5217-cbe7-4878-ad45-f1f90881384b
+let
+	z = [0.4, 0.4, 0.2]
+	K0 = [3.0, 0.25, 0.10]
+	rr_plot(β) = sum(@. z*(K0 - 1) / (1 + β*(K0 - 1)))
+	βmin = 1/(1 - maximum(K0))+1e-5
+	βmax = 1/(1 - minimum(K0))-1e-5
+	β_vec = range(βmin, βmax, length=1000)
+	plot(title="The Rachford-Rice equation", xlabel="β", ylabel="f(β)", framestyle=:box, xlim=(βmin, βmax), ylim=(-4, 4), tick_direction=:out, grid=:off, legendfont=font(10))
+	
+	plot!(β_vec, rr_plot.(β_vec), label="", linewidth=2)
+	vline!([0.0, 1.0], label="physical domain of β", linewidth=2)
+	hline!([0.0], linecolor=:black, label="")
+end
+
+# ╔═╡ 2ec95442-1bd2-4133-864f-037bc5c35c9e
+md"""
+From inspecting our equation, we can see that the equation will diverge to infinity when 
+
+$$\beta(K_i - 1) = -1$$
+
+As we're summing across many $K_i$ values, the interval where the Rachford-Rice function is well behaved is described by
+
+$$\beta \in \left(\frac{1}{1-K_\mathrm{max}}, \frac{1}{1-K_\mathrm{min}}\right)$$
+
+Another key feature to notice is that this bracket often falls outside of the physical domain of $\beta$
+
+$$\beta_{\mathrm{physical}} \in \left[0, 1\right]$$
+
+We refer to the case where the solution to the Rachford-Rice equation falls outside of this physical domain as a **negative flash**. This implies that VLE does exist at the overall conditions but the material balance is not satisfied, so the mixture does not split into multiple phases.
+
+Once we have the vapour fraction we can apply the material balances to calculate the compositions of our liquid and vapour phases.
+"""
+
+# ╔═╡ 4964a590-ef0e-4e2c-a90a-fe238d5766cf
+md"""
+### Task: Solving the Rachford-Rice equation
+
+Finish the functions below to solve for the phase distribution at the given K and z values.
+
+Use the Rachford-Rice equation as defined above, and the first derivative
+
+$$\begin{gather}
+f(\beta) = \sum_i^{N_\mathrm{C}} \frac{(K_i - 1)z_i}{1 + \beta(K_i - 1)} = 0\\
+f'(\beta) = -\sum_i^{N_\mathrm{C}} \frac{z_i(K_i-1)^2}{(1+\beta(K_i - 1))^2}
+\end{gather}$$
+
+Also use the Newton method in 1D, remembering it is defined as
+
+$$x_{n+1} = x_n - \frac{f(x)}{f^\prime(x)}$$
+
+The step-limiting will be done by checking if 
+
+$$β_\mathrm{new} ≥ β_\mathrm{max}$$
+or
+
+$$β_\mathrm{new} \leq β_\mathrm{min}$$
+
+and if either of those cases is true, reduce the step size by half until $β_\mathrm{new}$ is within the domain.
+
+$$d_\mathrm{new} = \frac{d}{2}$$
 
 where
 
-$$\begin{align} 
-a &= \frac{27}{64}\frac{(RT_c)^2}{P_c}\\
-b &= \frac{1}{8}\frac{RT_c}{P_c}\\
-\end{align}$$
+$$d_0 = \frac{f(x)}{f^′(x)}$$
 
-To solve this for the volume, we can leverage the fact you can rearrange it as a cubic equation in terms of the **compressibility factor**, Z.
+Your function should accept a composition vector $z$ and a K-factor vector $K$, and return a scalar for the vapour fraction $\beta$.
+"""
 
-To do this, we multiply the expression through by the denominators and substitute in the definition of Z.
+# ╔═╡ ad558065-7d69-411d-a033-da3d9047547c
+"""
+	rachford_rice(z, K, β)
 
-$$Z = \frac{Pv}{RT}$$
+Evaluates the Rachford-Rice objective function and returns a tuple (f, f′),
+where f is the function value at the given point and f′ is the derivative with respect to β.
+"""
+function rachford_rice(z, K, β)
+	
+	# (an) answer
+	inner_vec = @. (K - 1) / (1 + β*(K - 1))
+	f = sum(z.*inner_vec)
+	f′ = -sum(z.*inner_vec.^2)
+	return (f, f′)
+end
+
+# ╔═╡ 4ae44687-2b39-4e92-93a3-e40b74415231
+"""
+	solve_β(z, K)
+
+Solves the Rachford-Rice equation for the vapour fraction β using a step-limited Newton method.
+"""
+function solve_β(z, K)
+	
+	βmin = 1/(1-maximum(K))
+	βmax = 1/(1-minimum(K))
+
+	# Initial guess for β. 
+	β = (βmin + βmax)/2
+	δβ = 1.0
+	i = 0
+	itersmax = 100
+	# While the change is greater than our tolerance
+	while i < itersmax && abs(δβ) > 1e-7
+		i += 1
+		f, f′ = rachford_rice(z, K, β)
+		# Calculate the newton step
+		# d = NaN
+		
+		# Answer
+		d = f/f′
+
+		# Keep β inside the limits of f(β)
+		step_ok = false
+		while !step_ok
+			βnew = β - d
+			if βnew > βmax || βnew < βmin # Reject newton step
+				# println("reducing step size (i=$i)")
+				d = 0.5*d
+			else
+				# println("continuing (i=$i, d=$d)")
+				step_ok = true
+				δβ = βnew - β
+				β = βnew
+			end
+		end
+	end
+	if i == itersmax
+		@warn "failed to converge in $i iterations\n δΒ = $δβ\n β = $β\n βmin = $βmin\n βmax = $βmax"
+	end
+	return β
+end
+
+# ╔═╡ fc3805e2-5293-4cd0-ac25-48c520efb654
+begin
+	z_RR = [0.4, 0.4, 0.2]
+	K_RR = [3.0, 0.25, 0.10]
+	β_RR = solve_β(z_RR, K_RR)
+end
+
+# ╔═╡ 00ebf34a-dd75-48d4-834e-f6e0560df38d
+md"""
+## The Isothermal Flash
+
+The procedure above set out how to solve for the phase distribution for the case where our K-factors are composition independent, but this approximation is only valid for very ideal species. To move to more general phase split calculations, we must account for this.
+
+To do this we use the fact that K factors can be defined in two ways
 
 $$\begin{gather}
-Pv^2(v-b) = RTv^2 - a(v-b)\\
-Pv^3 - (bP + RT)v^2 + av - ab = 0\\
-Z^3 - \left(1 + \frac{bP}{RT}\right)Z^2 + \left(\frac{aP}{(RT)^2}\right)Z - \frac{abP^2}{(RT)^3} = 0
+K_i = \frac{y_i}{x_i}\\
+K_i = \frac{\varphi_i^L(p,T,\mathbf{x})}{\varphi_i^V(p,T,\mathbf y)}
 \end{gather}$$
 
-To express this cubic neatly we define 2 constants, $A$ and $B$.
+allowing us to formulate the problem as
 
-$$\begin{align} 
-A &= a\cdot\frac{P}{(RT)^2}\\
-B &= b\cdot\frac{P}{RT}
-\end{align}$$
+$$\mathbf K = f(\mathbf K)$$
 
-The cubic we then need to solve is
+which we solve for the **fixed points**. We can use many ways to solve for the fixed points, but the most simple is **subsequent substitution**. This is when we iterate using
 
-$$Z^3 - (1 + B)Z^2 + AZ - AB = 0$$
+$$\mathbf K_{n+1} = f(\mathbf K_n)$$
 
-A similar result can be obtained for any cubic equation.
+until the value of $\mathbf K$ converges to a fixed point.
 
-Let's now solve the van der Waals equation for Z and see if our answers make sense. Complete the expressions for A and B in the code below:
+Using subsequent substitution, this algorithm is broken up into 4 stages
+
+```
+0. Specify the state
+1. Calculate initial guesses
+
+While not converged
+2. Solve Rachford-Rice equation for x⃗, y⃗
+3. Calculate new K⃗
+
+When converged
+4. Calculate final β, x⃗, y⃗
+```
+
+Where stages 2 and 3 are the va
 """
 
-# ╔═╡ 9aa9b5bf-f938-4e96-9ed1-bed5c53ff93c
+# ╔═╡ 33d28a0e-31f8-40f4-9060-a35a4fe3ecf6
+md"""
+## 0. Specifying our state
+
+Before we begin any calculations, we need to specify a few things. We need to define the composition of our feed, our thermodynamic model, and the pressure and temperature we're conducting the flash at. Here, we're using **Peng Robinson** to model a 3 component mixture.
+
+$\begin{array}{lc}
+\hline \text{Component} & \text {Mole fraction} \\ \hline
+\text{Methane} & 0.4 \\
+\text{Ethane} & 0.4 \\
+\text{Hydrogen Sulfide} & 0.2 \\
+\hline
+\end{array}$
+
+$\begin{array}{lc}
+\hline \text{Specification} & \text {Value} \\ \hline
+\text{Pressure} & 255\text{ K} \\
+\text{Temperature} & 60\text{ bar} \\
+\hline
+\end{array}$
+"""
+
+# ╔═╡ aaac38e8-1d06-46ed-9607-a8e2fe1752e9
+md"""
+## 1. Initial guesses - the Wilson equation
+
+$$\ln K_i = \ln \frac{P_{c,i}}{P_i} + 5.373(1+\omega_i)\left(1-\frac{T_{c,i}}{T}\right)$$
+
+The Wilson approximation is based on the ideal solution approximation, and is structured to match pure component vapour pressure at $T_r = 0.7$ and $T_r = 1.0$. It relies on the **critical temperature and pressure** as well as the **acentric factor**, all easily obtainable properties of the pure components. While it generally performs quite well, especially for mixtures relevant to the petrochemical industry, it has very poor predictions when used with hydrogen.
+
+Good initial guesses are particularly important when avoiding converging to the **trivial solution**.
+"""
+
+# ╔═╡ 156674ce-b49e-44b6-8182-7f8da0a394af
+# Check if exercise
+# if !@isdefined(K0)
+# 	not_defined(:K0)
+# else
+# 	let
+# 		try
+# 			function Wilson_K_factor_test(pure_model, P, T)
+# 			Tc, Pc, _ = crit_pure(pure_model)
+# 			ω = acentric_factor(pure_model)
+# 			K = exp(log(Pc/P) + 5.373*(1+ω)*(1-Tc/T))
+# 			return K
+# 			end
+			
+# 			Ksol = Wilson_K_factor_test.(pure_models, P, T)
+# 			pure_test_model = PR(["methane"])
+# 			P_test, T_test = (1e6, 190.0)
+# 			K_test = Wilson_K_factor(pure_test_model, P_test, T_test)
+# 			K_test_sol = 0.9
+# 			# Check if function defined correctly and if K0 calculated correctly
+# 			if K0 ≈ Ksol
+# 				correct()
+# 			elseif K_test == K_test_sol
+# 				almost(md"Make you've changed `K0` correctly")
+# 			else # If nothing correct
+# 				keep_working(md"Make sure you've changed both the function `Wilson_K_factor` and `K0` correctly")
+# 			end
+# 		catch
+# 			keep_working(md"Make sure you've changed both the function `Wilson_K_factor` and `K0` correctly")
+# 		end
+# 	end
+# end
+
+# ╔═╡ 44097395-f6b9-414b-8c5a-980c97feb553
+md"""
+## 2. Rachford-Rice equation
+
+For this, we will use the solver we just developed to calculate 
+
+$$β = f(\mathbf K, \mathbf z)$$
+
+Then use the material balances to calculate the phase compositions
+
+$$\begin{gather}
+x_i = \frac{z_i}{1+\beta(K_i - 1)}\\
+y_i = K_i x_i
+\end{gather}$$
+"""
+
+# ╔═╡ 6f088d8b-a987-4fbd-a8d8-58c0acbf8aa0
+md"""
+## 3. Update K-factors
+
+To calculate the next set of K-factors we use the expression
+
+$$K_i = \frac{\varphi_i^L}{\varphi_i^V}$$
+
+where $\varphi$ can be obtained using Clapeyron with 
+
+```julia
+fugacity_coefficient(model, p, T, z; phase = :unknown)
+```
+
+
+"""
+
+# ╔═╡ 24b7f6f7-8204-4a31-aef9-c1d64b754fc3
+md"""
+## 4. Return values
+
+We then apply the same procudure as in step 2 to calculate the final return values
+
+$$(β,~\mathbf x,~\mathbf y)$$
+"""
+
+# ╔═╡ e870a839-4c93-4693-8f1c-7b370082beec
+md"""
+## Implementation
+Below there is a working implementation of the flash described above. Try changing some parameters and see how the phase split changes!
+"""
+
+# ╔═╡ c07e1d8b-113a-4382-af00-16332569fc8e
 begin
-	R = 8.314
-	(Tc, Pc) = (373.3, 89.7e5) # Critical parameters for H2S
-	(T, P) = (298.0, 101325.0) # Current state
-	a = 27/64 * (R*Tc)^2/Pc
-	b = 1/8 * (R*Tc)/Pc
+	comps = ["methane", "ethane", "hydrogen sulfide"] # Define the components
+	model = PR(comps) # Create our fluid model
+	pure_models = split_model.(model) # Create a vector of models for each of our pure substances
 	
-	A = a*P/(R*T)^2
-	B = b*P/(R*T)
-	# A = a
-	# B = b
-	
-	poly = [-A*B, A, -(1+B), 1.0]
-	Zvec = roots(poly)
-	Vvec = Zvec.*(R*T/P)
+	# Describe our state
+	p = 55e5 # Pa
+	T = 255.0 # K
+	z = [0.4, 0.4, 0.2]
 end;
 
-# ╔═╡ 78ac6273-5029-4aa0-9e44-caacab4e40ef
+# ╔═╡ 8fdc31ec-178a-4ffd-b029-5590f192332f
+"""
+	update_K_factors(model, p, T, x, y)
+returns a vector of K-factors
+"""
+function update_K_factors(model, p, T, x, y)
+	φᴸ = fugacity_coefficient(model, p, T, x)
+	φⱽ = fugacity_coefficient(model, p, T, y)
+	K = φᴸ./φⱽ
+	return K
+end
+
+# ╔═╡ 1453647c-213c-4627-a5b1-ffc1f95204a1
+function solve_flash(model, p, T, z, K0; maxiters=100, abstol=1e-7)
+	iters = 0
+	K_norm = 1.0
+	K = K0
+	while K_norm > abstol && iters < maxiters
+		iters += 1
+
+		β = solve_β(z, K)
+		x = @. z/(1 + β*(K - 1))
+		y = @. K*x
+
+		Knew = update_K_factors(model, p, T, x, y)
+		K_norm = norm(Knew .- K)
+		K = Knew
+	end
+
+	# Make sure to issue a warning if the flash failed to converge!
+	iters == maxiters && @warn "did not converge in $iters iterations"
+
+	β = solve_β(z, K)
+	x = @. z/(1 + β*(K - 1))
+	y = @. K*x
+	return (β, x, y)
+end
+
+# ╔═╡ 001c511c-34b9-4a25-b901-1b98a3eaea9b
 md"""
-Now we have that working, we can see we have 3 real roots. How do we know which one to choose? We know that the smallest root is _liquidlike_, the largest root is _vapourlike_, and that the middle root has no physical meaning. From our physical knowledge of hydrogen sulfide, we can tell that it should be a gas and so we should take the vapourlike root, but this isn't something we can apply rigorously or put into our code.
+## Convergence of the two-phase flash
 
-In some situations the cubic equation will have imaginary roots which can obviously be discarded, but most of the time a decision between roots has to be made. To do this, we will introduce the **gibbs free energy**, as we know that the phase with the lowest gibbs free energy (or chemical potential) will exist at the given conditions.
+Subsequent substitution converges very quickly for situations where the state is far from the critical point and when the K-factors are weakly dependent on composition. When we fall outside of these cases, this method can take hundreds of iterations to converge.
 
-To express the chemical potential
+To visualise this, we can keep track of our convergence measure (the Euclidian norm of change in $\mathbf K$) and plot this against the number of iterations.
 """
 
-# ╔═╡ 11bd73c1-c745-4d30-adc0-19209e0c0c82
+# ╔═╡ b04743cd-bdc8-46a7-be77-8b0e116fae3a
+function rootfinding_obj_func!(F, K, p, T, z)
+	any(isnan.(K)) && @error ("K = $K\n F = $F")
+	β = solve_β(z, K)
+	x = @. z/(1 + β*(K - 1))
+	y = @. K*x
+	Knew = update_K_factors(model, p, T, x, y)
+	F .= Knew .- K
+end
 
+# ╔═╡ 32870a35-1276-4d91-aa55-64f6256b4188
+md"""
+In this figure we show the convergence speed of three different iteration procedures for the flash calculation. We see the Newton algorithm converges very quickly, followed by the accelerated successive substitution, then finally the standard successive substitution procedure we wrote earlier.
+
+Newton methods are described as having _quadratic_ convergence, while the successive substitution method has _linear_ convergence. The acceleration procedure uses the last _m_ iterations, in this case 5, to extrapolate each step and converge faster. This can be described as _superlinear_ convergence, converging faster than a simple linear method.
+
+However, it's also important to understand that converging in a smaller number of iterations does not imply a method will always be faster. If we look at the actual execution time of each flash method, we see that the Newton method in this case is performing worse than even successive substitution!
+
+So how could this happen? Because the Newton method requires the gradient of the function, this will result in more function evaluations per step, requiring a far longer time for every iteration.
+
+Because of this limitation, Michelsen [INSERT REFERENCE] proposed a combination algorithm, leveraging the advantages of both accelerated successive substitution and the Newton method. As we can see accelerated successive substitution converges very quickly for most situations, we perform up to 15 iterations of this method, then switch to a faster converging, but slower to evalute, method like Newton.
+"""
+
+# ╔═╡ e715a1b3-c11b-4d01-96d3-af3b64dee96c
+let
+	model = PR(["methane","butane","isobutane","pentane"])
+	
+	x = [0.96611,0.01475,0.01527,0.00385]
+
+	# comps = ["methane", "ethane", "butane", "hydrogen sulfide"]
+	# model = PR(comps)
+	# x = [0.4, 0.3, 0.1, 0.2]
+	
+	p = []
+	T = []
+	Tcrit = 204.173
+	# Tcrit = 287.272
+	Tmax = 265.5
+	# Tmax = 350.0
+	T1 = range(150,Tcrit,length=400)
+	T2 = range(200,Tmax,length=400)
+	T3 = range(Tmax,215,length=400)
+	bub1 = []
+	bub2 = []
+	bub3 = []
+	v1 = []
+	v2 = []
+	for i ∈ 1:400
+		if i ==1
+			append!(bub1,[bubble_pressure(model,T1[i],x)])
+			v1 = [log10(bub1[i][2]),log10(bub1[i][3]),bub1[i][4][1],bub1[i][4][2],bub1[i][4][3],bub1[i][4][4]]
+			append!(bub2,[dew_pressure(model,T2[i],x)])
+			v2 = [log10(bub2[i][2]),log10(bub2[i][3]),bub2[i][4][1],bub2[i][4][2],bub2[i][4][3],bub2[i][4][4]]
+		else
+			append!(bub1,[bubble_pressure(model,T1[i],x;v0=v1)])
+			v1 = [log10(bub1[i][2]),log10(bub1[i][3]),bub1[i][4][1],bub1[i][4][2],bub1[i][4][3],bub1[i][4][4]]
+			append!(bub2,[dew_pressure(model,T2[i],x;v0=v2)])
+			v2 = [log10(bub2[i][2]),log10(bub2[i][3]),bub2[i][4][1],bub2[i][4][2],bub2[i][4][3],bub2[i][4][4]]    
+		end
+	end
+
+	v3 = deepcopy(v2)
+	v3[2] = 1.1*v3[2]
+
+	for i ∈ 1:400
+#         
+		if i ==1
+			append!(bub3,[dew_pressure(model,T3[i],x;v0=v3)])
+			v3 = [log10(bub3[i][2]),log10(bub3[i][3]),bub3[i][4][1],bub3[i][4][2],bub3[i][4][3],bub3[i][4][4]]
+		else
+			append!(bub3,[dew_pressure(model,T3[i],x;v0=v3)])
+			v3 = [log10(bub3[i][2]),log10(bub3[i][3]),bub3[i][4][1],bub3[i][4][2],bub3[i][4][3],bub3[i][4][4]]
+		end
+	end
+
+	p1 = [bub1[i][1] for i ∈ 1:400]
+	p2 = [bub2[i][1] for i ∈ 1:400]
+	p3 = [bub3[i][1] for i ∈ 1:400]
+	
+	p = []
+	append!(p,p1)
+	append!(p,reverse(p3))
+	append!(p,reverse(p2))
+	T = []
+	append!(T,T1)
+	append!(T,reverse(T3))
+	append!(T,reverse(T2))
+	
+	plot(title="pT isopleth", xlabel="T / K", ylabel="p / MPa", framestyle=:box, tick_direction=:out, grid=:off)
+	plot!(T,p./1e6,label="")
+end
 
 # ╔═╡ 4acb1393-030f-4cab-a765-f8de5a75893b
 html"<br><br><br><br><br><br><br><br><br><br><br><br>"
@@ -117,18 +538,260 @@ md"## Function library
 
 Just some helper functions used in the notebook."
 
-# ╔═╡ 332ab61e-91d2-4dd7-9a59-699d8f6a4de1
-md"""
-###### Specific
-"""
+# ╔═╡ 6e576917-f1c5-4535-b8d4-a9d1c7814e30
+function acentric_factor(pure)
+	Tc,pc,_ = crit_pure(pure)
+	ps = first(saturation_pressure(pure,0.7*Tc))
+	ω = -log10(ps/pc) - 1.0
+	return ω
+end
 
-# ╔═╡ d6ae4c8a-ab5b-413f-88df-b5f4fc678ff9
-md"""
-###### Generic
+# ╔═╡ 5fb5e842-b684-47b9-a60e-deedc485914c
 """
+	Wilson_K_factor(pure_model, p, T)
+
+Returns the K-factor predicted by the Wilson correlation for a pure component at a given pressure and temperature
+"""
+function Wilson_K_factor(pure_model, p, T)
+	Tc, pc, vc = crit_pure(pure_model)
+	ω = acentric_factor(pure_model)
+	
+	# Complete the expression for calculating K-factors
+	K = exp(log(pc/p) + 5.373*(1+ω)*(1-Tc/T))
+	# K = NaN
+	
+	return K
+end
+
+# ╔═╡ cec97051-aec3-4e17-95eb-90d19b947c37
+K0 = Wilson_K_factor.(pure_models, p, T)
+
+# ╔═╡ 90baae39-478b-493c-ac23-4fadca9c3698
+begin
+	try
+		@htl("""
+		<table>
+		  <tr>
+		    <th>Component</th>
+		    <th>K-factor</th>
+		  </tr>
+		  <tr>
+		    <td>$(comps[1])</td>
+		    <td>$(round(K0[1]; digits=4))</td>
+		  </tr>
+		  <tr>
+		    <td>$(comps[2])</td>
+		    <td>$(round(K0[2]; digits=4))</td>
+		  </tr>
+		  <tr>
+		    <td>$(comps[3])</td>
+		    <td>$(round(K0[3]; digits=4))</td>
+		  </tr>
+		</table>
+		""")
+	catch
+		@htl("""
+		<table>
+		  <tr>
+		    <th>Component</th>
+		    <th>K</th>
+		  </tr>
+		  <tr>
+		    <td>$(comps[1])</td>
+		    <td>?</td>
+		  </tr>
+		  <tr>
+		    <td>$(comps[2])</td>
+		    <td>?</td>
+		  </tr>
+		  <tr>
+		    <td>$(comps[3])</td>
+		    <td>?</td>
+		  </tr>
+		</table>
+		""")
+	end
+end
+
+# ╔═╡ 96476f2f-a791-4ea6-9f81-8a17a00d6c1f
+β_flash, x_flash, y_flash = solve_flash(model, p, T, z, K0)
+
+# ╔═╡ 7b4e20ce-815a-46c7-bcc5-7b6531542049
+let
+	try
+		@htl("""
+		<table>
+		  <tr>
+		    <th rowspan="2">Component</th>
+		    <th colspan="2">Mole fraction</th>
+		  </tr>
+		  <tr>
+			<th>Liquid</th>
+			<th>Vapour</th>
+		  </tr>
+		  <tr>
+		    <td>$(comps[1])</td>
+		    <td>$(round(x_flash[1]; digits=4))</td>
+		    <td>$(round(y_flash[1]; digits=4))</td>
+		  </tr>
+		  <tr>
+		    <td>$(comps[2])</td>
+		    <td>$(round(x_flash[2]; digits=4))</td>
+		    <td>$(round(y_flash[2]; digits=4))</td>
+		  </tr>
+		  <tr>
+		    <td>$(comps[3])</td>
+		    <td>$(round(x_flash[3]; digits=4))</td>
+		    <td>$(round(y_flash[3]; digits=4))</td>
+		  </tr>
+		</table>
+		<center>
+		β = $(round(β_flash; digits=4))
+		</center>
+		""")
+	catch
+		@htl("""
+		<table>
+		  <tr>
+		    <th rowspan="2">Component</th>
+		    <th colspan="2">Mole fraction</th>
+		  </tr>
+		  <tr>
+			<th>Liquid</th>
+			<th>Vapour</th>
+		  </tr>
+		  <tr>
+		    <td>$(comps[1])</td>
+		    <td>?</td>
+		    <td>?</td>
+		  </tr>
+		  <tr>
+		    <td>$(comps[2])</td>
+		    <td>?</td>
+		    <td>?</td>
+		  </tr>
+		  <tr>
+		    <td>$(comps[3])</td>
+		    <td>?</td>
+		    <td>?</td>
+		  </tr>
+		</table>
+		<center>
+		β = ?
+		</center>
+		""")
+	end
+end
+
+# ╔═╡ 772be193-8ca2-4eff-9e25-c6166efaefcf
+solve_flash(model, p, T, z, K0; maxiters=20)
+
+# ╔═╡ 734dd8c9-cf26-4cf8-baf2-63cf97c34c2b
+begin
+	f!(F, K) = rootfinding_obj_func!(F, K, p, T, z)
+
+	# Run to pre-compile
+	for i in range(1, 5)
+		nlsolve(f!, K0; store_trace=true, method=:anderson, m=0)
+		nlsolve(f!, K0; store_trace=true, method=:anderson, m=5)
+		nlsolve(f!, K0; autodiff=:forward, store_trace=true, method=:newton)
+	end
+	
+	res_vec = []
+
+	t1 = time()
+	res = nlsolve(f!, K0; store_trace=true, method=:anderson, m=0)
+	t1 = time() - t1
+	push!(res_vec, ["successive substitution", res])
+
+	t2 = time()
+	res = nlsolve(f!, K0; store_trace=true, method=:anderson, m=5)
+	t2 = time() - t2
+	push!(res_vec, ["accelerated successive substitution", res])
+
+	t3 = time()
+	res = nlsolve(f!, K0; autodiff=:forward, store_trace=true, method=:newton)
+	t3 = time() - t3
+	push!(res_vec, ["newton", res])
+end
+
+# ╔═╡ 457b66ff-7972-49b8-b57a-4b4fc5f0ad06
+let
+	p = plot(title="Convergence characteristics of flash calculations", xlabel="iteration", ylabel="K-norm", framestyle=:box, tick_direction=:out, grid=:off, yaxis=:log, yticks=exp10.(range(-11, 0)), xlim=(0, 25), legendfont=font(10))
+	
+	for (method, res) in res_vec
+		iter = [x.iteration for x in res.trace.states]
+		residual = [x.fnorm for x in res.trace.states]
+		plot!(p, iter, residual, linewidth=2, label=string(method))
+	end
+	p
+end
+
+# ╔═╡ 294d57f6-3415-40d4-83f7-d218ad6569cd
+let
+	try
+		@htl("""
+		<table>
+		<caption>Execution times for different flash methods</caption>
+		  <tr>
+		    <th>Method</th>
+		    <th>Execution Time (μs)</th>
+		  </tr>
+		  <tr>
+			<td>Successive Substitution</td>
+			<td>$(round(t1*1e6; sigdigits=3))</td>
+		  </tr>
+		  <tr>
+			<td>Accelerated Successive Substitution</td>
+			<td>$(round(t2*1e6; sigdigits=3))</td>
+		  </tr>
+		  <tr>
+			<td>Newton</td>
+			<td>$(round(t3*1e6; sigdigits=3))</td>
+		  </tr>
+		</table>
+		""")
+	catch
+		@htl("""
+		<table>
+		<caption>Execution times for different flash methods</caption>
+		  <tr>
+		    <th>Method</th>
+		    <th>Execution Time (μs)</th>
+		  </tr>
+		  <tr>
+			<td>Successive Substitution</td>
+			<td>?</td>
+		  </tr>
+		  <tr>
+			<td>Accelerated Successive Substitution</td>
+			<td>?</td>
+		  </tr>
+		  <tr>
+			<td>Newton</td>
+			<td>?</td>
+		  </tr>
+		</table>
+		""")
+	end
+end
 
 # ╔═╡ d0b2f6bb-7539-4dda-adc9-acc2ce9cca4a
 hint(text) = Markdown.MD(Markdown.Admonition("hint", "Hint", [text]))
+
+# ╔═╡ d6778a9d-2455-434d-b459-27195ac7a59f
+hint(md"""
+Consider using the broadcasting macro @. to simplify your expression in rachford_rice
+""")
+
+# ╔═╡ c2e866df-a46b-4ca0-8b3f-e7fa2e7b4143
+hint(md"""
+Calculate your Newton step using 
+
+$$d = \frac{f}{f^′}$$
+
+You can write ′ by typing \prime then pressing tab.
+""")
 
 # ╔═╡ 8fe83aab-d193-4a28-a763-6420abcbb176
 almost(text) = Markdown.MD(Markdown.Admonition("warning", "Almost there!", [text]))
@@ -146,27 +809,25 @@ yays = [md"Fantastic!", md"Splendid!", md"Great!", md"Yay ❤", md"Great! 🎉",
 correct(text=rand(yays)) = Markdown.MD(Markdown.Admonition("correct", "Got it!", [text]))
 
 # ╔═╡ 970bb661-c959-4f0c-a1d6-50f655b80ef8
-not_defined(variable_name) = Markdown.MD(Markdown.Admonition("danger", "Oopsie!", [md"Make sure that you define a variable called **$(Markdown.Code(string(variable_name)))**"]))
+not_defined(variable_name) = Markdown.MD(Markdown.Admonition("danger", "Oopsie!", [md"Make sure that you define **$(Markdown.Code(string(variable_name)))**"]))
 
-# ╔═╡ 156674ce-b49e-44b6-8182-7f8da0a394af
-if !@isdefined(Zvec)
-	not_defined(:Zvec)
+# ╔═╡ 80732074-1d94-45ed-8e5e-ea92d3985a1c
+if !@isdefined(β_RR)
+	not_defined(:β_RR)
 else
 	let
-		Asol = a*P/(R*T)^2
-		Bsol = b*P/(R*T)
-		if (A==Asol) && (B==Bsol)
-			if (Zvec == roots([-A*B, A, -(1+B), 1.0]))
-				correct()
-			else
-				almost(md"Make sure `poly` and `Zvec` are defined correctly")
-			end
-		elseif (A==Asol)
-			still_missing(md"Make sure `B` is defined correctly")
-		elseif (B==Bsol)
-			still_missing(md"Make sure `A` is defined correctly")
-		else
-			keep_working(md"Make sure you've defined `A` and `B` carefully")
+		try
+			correct(md"I haven't finished this yet!")
+			# # Check if function defined correctly and if K0 calculated correctly
+			# if K0 ≈ Ksol
+			# 	correct()
+			# elseif K_test == K_test_sol
+			# 	almost(md"Make you've changed `K0` correctly")
+			# else # If nothing correct
+			# 	keep_working(md"Make sure you've changed both the function `Wilson_K_factor` and `K0` correctly")
+			# end
+		catch
+			keep_working()
 		end
 	end
 end
@@ -239,54 +900,15 @@ function latex_table(headers, names, values) # TODO: Make this work on input lis
 	# """
 end
 
-# ╔═╡ e41c0fe1-6b26-4194-868b-34259293243c
-md"""
-$\begin{array}{lc}
-\hline \text{Variable} & \text { Value } \\
-\hline \delta_1 & 0 \\
-\delta_2 & 0 \\
-\alpha(T) & 1 \\
-\hline
-\end{array}$
-"""
-
 # ╔═╡ 808c11cb-f930-4fd6-b827-320e845a47a7
 function reduce_complex(Zvec)
 	Zvec = Vector{Union{Float64, ComplexF64}}(Zvec)
 	Zvec[abs.(imag.(Zvec)) .< eps()] .= real(Zvec[abs.(imag.(Zvec)) .< eps()])
 end
 
-# ╔═╡ 90baae39-478b-493c-ac23-4fadca9c3698
-begin
-	try
-		Zvec_show = reduce_complex(Zvec)
-		Vvec_show = reduce_complex(Vvec)
-		@htl("""
-		<table>
-		  <tr>
-		    <th>Root</th>
-		    <th>Z</th>
-			<th>V (m³)</th>
-		  </tr>
-		  <tr>
-		    <td>1</td>
-		    <td>$(round(Zvec_show[1]; digits=4))</td>
-		    <td>$(@sprintf "%.2e" Vvec_show[1])</td>
-		  </tr>
-		  <tr>
-		    <td>2</td>
-		    <td>$(round(Zvec_show[2]; digits=4))</td>
-		    <td>$(@sprintf "%.2e" Vvec_show[2])</td>
-		  </tr>
-		  <tr>
-		    <td>3</td>
-		    <td>$(round(Zvec_show[3]; digits=4))</td>
-		    <td>$(@sprintf "%.2e" Vvec_show[3])</td>
-		  </tr>
-		</table>
-		""")
-	catch
-	end
+# ╔═╡ 73912a13-87ce-4a0c-ab1b-b0bfd703e99e
+function mean(x)
+	return sum(x)/length(x)
 end
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
@@ -297,21 +919,18 @@ ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
 HypertextLiteral = "ac1192a8-f4b3-4bfe-ba22-af5b92cd3ab2"
 LaTeXStrings = "b964fa9f-0449-5b57-a5c2-d3ea65f4040f"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
-Optim = "429524aa-4258-5aef-a3af-852621145aeb"
+NLsolve = "2774e3e8-f4cf-5e23-947b-6d7e65073b56"
 Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
-PolynomialRoots = "3a141323-8675-5d76-9d11-e1df1406c778"
-Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 Roots = "f2b01f46-fcfa-551c-844a-d8ac1e96c665"
 ShortCodes = "f62ebe17-55c5-4640-972f-b59c0dd11ccf"
 
 [compat]
-Clapeyron = "~0.3.6"
+Clapeyron = "~0.3.7"
 ForwardDiff = "~0.10.30"
 HypertextLiteral = "~0.9.4"
 LaTeXStrings = "~1.3.0"
-Optim = "~1.7.0"
-Plots = "~1.30.1"
-PolynomialRoots = "~1.0.0"
+NLsolve = "~4.5.1"
+Plots = "~1.31.1"
 Roots = "~2.0.1"
 ShortCodes = "~0.3.3"
 """
@@ -334,9 +953,9 @@ uuid = "0dad84c5-d112-42e6-8d28-ef12dabb789f"
 
 [[deps.ArrayInterfaceCore]]
 deps = ["LinearAlgebra", "SparseArrays", "SuiteSparse"]
-git-tree-sha1 = "d618d3cf75e8ed5064670e939289698ecf426c7f"
+git-tree-sha1 = "7d255eb1d2e409335835dc8624c35d97453011eb"
 uuid = "30b0a656-2188-435a-8636-2ec0e6a096e2"
-version = "0.1.12"
+version = "0.1.14"
 
 [[deps.Artifacts]]
 uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
@@ -381,9 +1000,9 @@ version = "0.5.1"
 
 [[deps.ChainRulesCore]]
 deps = ["Compat", "LinearAlgebra", "SparseArrays"]
-git-tree-sha1 = "9489214b993cd42d17f44c36e359bf6a7c919abf"
+git-tree-sha1 = "2dd813e5f2f7eec2d1268c57cf2373d3ee91fcea"
 uuid = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
-version = "1.15.0"
+version = "1.15.1"
 
 [[deps.ChangesOfVariables]]
 deps = ["ChainRulesCore", "LinearAlgebra", "Test"]
@@ -393,9 +1012,9 @@ version = "0.1.3"
 
 [[deps.Clapeyron]]
 deps = ["BlackBoxOptim", "CSV", "DiffResults", "FillArrays", "ForwardDiff", "LinearAlgebra", "LogExpFunctions", "NLSolvers", "PackedVectorsOfVectors", "PositiveFactorizations", "Roots", "Scratch", "SparseArrays", "StaticArrays", "Tables", "ThermoState", "UUIDs", "Unitful"]
-git-tree-sha1 = "842e3003389750193c2fbc7bdd62c5ba9f2f3cc5"
+git-tree-sha1 = "1ebd358d7c650500aab466d28c55b45a020553ae"
 uuid = "7c7805af-46cc-48c9-995b-ed0ed2dc909a"
-version = "0.3.6"
+version = "0.3.7"
 
 [[deps.CodecZlib]]
 deps = ["TranscodingStreams", "Zlib_jll"]
@@ -405,9 +1024,9 @@ version = "0.7.0"
 
 [[deps.ColorSchemes]]
 deps = ["ColorTypes", "ColorVectorSpace", "Colors", "FixedPointNumbers", "Random"]
-git-tree-sha1 = "7297381ccb5df764549818d9a7d57e45f1057d30"
+git-tree-sha1 = "1fd869cc3875b57347f7027521f561cf46d1fcd8"
 uuid = "35d6a980-a343-548e-a6ea-1d62b119f2f4"
-version = "3.18.0"
+version = "3.19.0"
 
 [[deps.ColorTypes]]
 deps = ["FixedPointNumbers", "Random"]
@@ -450,15 +1069,14 @@ uuid = "e66e0078-7015-5450-92f7-15fbd957f2ae"
 
 [[deps.ConstructionBase]]
 deps = ["LinearAlgebra"]
-git-tree-sha1 = "f74e9d5388b8620b4cee35d4c5a618dd4dc547f4"
+git-tree-sha1 = "59d00b3139a9de4eb961057eabb65ac6522be954"
 uuid = "187b0558-2788-49d3-abe0-74a17ed4e7c9"
-version = "1.3.0"
+version = "1.4.0"
 
 [[deps.Contour]]
-deps = ["StaticArrays"]
-git-tree-sha1 = "9f02045d934dc030edad45944ea80dbd1f0ebea7"
+git-tree-sha1 = "a599cfb8b1909b0f97c5e1b923ab92e1c0406076"
 uuid = "d38c429a-6771-53c6-b99e-75d170b6e991"
-version = "0.5.7"
+version = "0.6.1"
 
 [[deps.DataAPI]]
 git-tree-sha1 = "fb5f5316dd3fd4c5e7c30a24d50643b73e37cd40"
@@ -502,15 +1120,21 @@ git-tree-sha1 = "28d605d9a0ac17118fe2c5e9ce0fbb76c3ceb120"
 uuid = "b552c78f-8df3-52c6-915a-8e097449b14b"
 version = "1.11.0"
 
+[[deps.Distances]]
+deps = ["LinearAlgebra", "SparseArrays", "Statistics", "StatsAPI"]
+git-tree-sha1 = "3258d0659f812acde79e8a74b11f17ac06d0ca04"
+uuid = "b4f34e82-e78d-54a5-968a-f98e89d6e8f7"
+version = "0.10.7"
+
 [[deps.Distributed]]
 deps = ["Random", "Serialization", "Sockets"]
 uuid = "8ba89e20-285c-5b6f-9357-94700520ee1b"
 
 [[deps.Distributions]]
 deps = ["ChainRulesCore", "DensityInterface", "FillArrays", "LinearAlgebra", "PDMats", "Printf", "QuadGK", "Random", "SparseArrays", "SpecialFunctions", "Statistics", "StatsBase", "StatsFuns", "Test"]
-git-tree-sha1 = "0ec161f87bf4ab164ff96dfacf4be8ffff2375fd"
+git-tree-sha1 = "d530092b57aef8b96b27694e51c575b09c7f0b2e"
 uuid = "31c24e10-a181-5473-b8eb-7969acd0382f"
-version = "0.25.62"
+version = "0.25.64"
 
 [[deps.DocStringExtensions]]
 deps = ["LibGit2"]
@@ -688,9 +1312,9 @@ version = "0.5.1"
 
 [[deps.InlineStrings]]
 deps = ["Parsers"]
-git-tree-sha1 = "61feba885fac3a407465726d0c330b3055df897f"
+git-tree-sha1 = "d19f9edd8c34760dca2de2b503f969d8700ed288"
 uuid = "842dd82b-1e85-43dc-bf29-5d0ee9dffc48"
-version = "1.1.2"
+version = "1.1.4"
 
 [[deps.InteractiveUtils]]
 deps = ["Markdown"]
@@ -873,10 +1497,10 @@ deps = ["Base64"]
 uuid = "d6f4376e-aef5-505a-96c1-9c027394607a"
 
 [[deps.MbedTLS]]
-deps = ["Dates", "MbedTLS_jll", "Random", "Sockets"]
-git-tree-sha1 = "1c38e51c3d08ef2278062ebceade0e46cefc96fe"
+deps = ["Dates", "MbedTLS_jll", "MozillaCACerts_jll", "Random", "Sockets"]
+git-tree-sha1 = "891d3b4e8f8415f53108b4918d0183e61e18015b"
 uuid = "739be429-bea8-5141-9913-cc70e7f3736d"
-version = "1.0.3"
+version = "1.1.0"
 
 [[deps.MbedTLS_jll]]
 deps = ["Artifacts", "Libdl"]
@@ -917,6 +1541,12 @@ git-tree-sha1 = "50310f934e55e5ca3912fb941dec199b49ca9b68"
 uuid = "d41bc354-129a-5804-8e4c-c37616107c6c"
 version = "7.8.2"
 
+[[deps.NLsolve]]
+deps = ["Distances", "LineSearches", "LinearAlgebra", "NLSolversBase", "Printf", "Reexport"]
+git-tree-sha1 = "019f12e9a1a7880459d0173c182e6a99365d7ac1"
+uuid = "2774e3e8-f4cf-5e23-947b-6d7e65073b56"
+version = "4.5.1"
+
 [[deps.NaNMath]]
 git-tree-sha1 = "b086b7ea07f8e38cf122f5016af580881ac914fe"
 uuid = "77ba4419-2d1f-58cd-9bb1-8ffee604a2e3"
@@ -941,21 +1571,15 @@ uuid = "05823500-19ac-5b8b-9628-191a04bc5112"
 
 [[deps.OpenSSL_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
-git-tree-sha1 = "ab05aa4cc89736e95915b01e7279e61b1bfe33b8"
+git-tree-sha1 = "9a36165cf84cff35851809a40a928e1103702013"
 uuid = "458c3c95-2e84-50aa-8efc-19380b2a3a95"
-version = "1.1.14+0"
+version = "1.1.16+0"
 
 [[deps.OpenSpecFun_jll]]
 deps = ["Artifacts", "CompilerSupportLibraries_jll", "JLLWrappers", "Libdl", "Pkg"]
 git-tree-sha1 = "13652491f6856acfd2db29360e1bbcd4565d04f1"
 uuid = "efe28fd5-8261-553b-a9e1-b2916fc3738e"
 version = "0.5.5+0"
-
-[[deps.Optim]]
-deps = ["Compat", "FillArrays", "ForwardDiff", "LineSearches", "LinearAlgebra", "NLSolversBase", "NaNMath", "Parameters", "PositiveFactorizations", "Printf", "SparseArrays", "StatsBase"]
-git-tree-sha1 = "7a28efc8e34d5df89fc87343318b0a8add2c4021"
-uuid = "429524aa-4258-5aef-a3af-852621145aeb"
-version = "1.7.0"
 
 [[deps.Opus_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
@@ -976,9 +1600,9 @@ version = "8.44.0+0"
 
 [[deps.PDMats]]
 deps = ["LinearAlgebra", "SparseArrays", "SuiteSparse"]
-git-tree-sha1 = "7f4869861f8dac4990d6808b66b57e5a425cfd99"
+git-tree-sha1 = "ca433b9e2f5ca3a0ce6702a032fce95a3b6e1e48"
 uuid = "90014a1f-27ba-587c-ab20-58faa44d9150"
-version = "0.11.13"
+version = "0.11.14"
 
 [[deps.PackedVectorsOfVectors]]
 git-tree-sha1 = "78a46960967e9e37f81dbf7f61b45b0159637afe"
@@ -1015,20 +1639,15 @@ version = "3.0.0"
 
 [[deps.PlotUtils]]
 deps = ["ColorSchemes", "Colors", "Dates", "Printf", "Random", "Reexport", "Statistics"]
-git-tree-sha1 = "bb16469fd5224100e422f0b027d26c5a25de1200"
+git-tree-sha1 = "9888e59493658e476d3073f1ce24348bdc086660"
 uuid = "995b91a9-d308-5afd-9ec6-746e21dbc043"
-version = "1.2.0"
+version = "1.3.0"
 
 [[deps.Plots]]
 deps = ["Base64", "Contour", "Dates", "Downloads", "FFMPEG", "FixedPointNumbers", "GR", "GeometryBasics", "JSON", "Latexify", "LinearAlgebra", "Measures", "NaNMath", "Pkg", "PlotThemes", "PlotUtils", "Printf", "REPL", "Random", "RecipesBase", "RecipesPipeline", "Reexport", "Requires", "Scratch", "Showoff", "SparseArrays", "Statistics", "StatsBase", "UUIDs", "UnicodeFun", "Unzip"]
-git-tree-sha1 = "2402dffcbc5bb1631fb4f10cb5c3698acdce29ea"
+git-tree-sha1 = "93e82cebd5b25eb33068570e3f63a86be16955be"
 uuid = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
-version = "1.30.1"
-
-[[deps.PolynomialRoots]]
-git-tree-sha1 = "5f807b5345093487f733e520a1b7395ee9324825"
-uuid = "3a141323-8675-5d76-9d11-e1df1406c778"
-version = "1.0.0"
+version = "1.31.1"
 
 [[deps.PooledArrays]]
 deps = ["DataAPI", "Future"]
@@ -1178,15 +1797,20 @@ version = "0.1.3"
 
 [[deps.SpecialFunctions]]
 deps = ["ChainRulesCore", "IrrationalConstants", "LogExpFunctions", "OpenLibm_jll", "OpenSpecFun_jll"]
-git-tree-sha1 = "a9e798cae4867e3a41cae2dd9eb60c047f1212db"
+git-tree-sha1 = "d75bda01f8c31ebb72df80a46c88b25d1c79c56d"
 uuid = "276daf66-3868-5448-9aa4-cd146d93841b"
-version = "2.1.6"
+version = "2.1.7"
 
 [[deps.StaticArrays]]
-deps = ["LinearAlgebra", "Random", "Statistics"]
-git-tree-sha1 = "2bbd9f2e40afd197a1379aef05e0d85dba649951"
+deps = ["LinearAlgebra", "Random", "StaticArraysCore", "Statistics"]
+git-tree-sha1 = "9f8a5dc5944dc7fbbe6eb4180660935653b0a9d9"
 uuid = "90137ffa-7385-5640-81b9-e52037218182"
-version = "1.4.7"
+version = "1.5.0"
+
+[[deps.StaticArraysCore]]
+git-tree-sha1 = "66fe9eb253f910fe8cf161953880cfdaef01cdf0"
+uuid = "1e83bf80-4336-4d27-bf5d-d5a4f845583c"
+version = "1.0.1"
 
 [[deps.Statistics]]
 deps = ["LinearAlgebra", "SparseArrays"]
@@ -1200,9 +1824,9 @@ version = "1.4.0"
 
 [[deps.StatsBase]]
 deps = ["DataAPI", "DataStructures", "LinearAlgebra", "LogExpFunctions", "Missings", "Printf", "Random", "SortingAlgorithms", "SparseArrays", "Statistics", "StatsAPI"]
-git-tree-sha1 = "8977b17906b0a1cc74ab2e3a05faa16cf08a8291"
+git-tree-sha1 = "48598584bacbebf7d30e20880438ed1d24b7c7d6"
 uuid = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
-version = "0.33.16"
+version = "0.33.18"
 
 [[deps.StatsFuns]]
 deps = ["ChainRulesCore", "HypergeometricFunctions", "InverseFunctions", "IrrationalConstants", "LogExpFunctions", "Reexport", "Rmath", "SpecialFunctions"]
@@ -1212,9 +1836,9 @@ version = "1.0.1"
 
 [[deps.StructArrays]]
 deps = ["Adapt", "DataAPI", "StaticArrays", "Tables"]
-git-tree-sha1 = "9abba8f8fb8458e9adf07c8a2377a070674a24f1"
+git-tree-sha1 = "ec47fb6069c57f1cee2f67541bf8f23415146de7"
 uuid = "09ab397b-f2b6-538f-b94a-2f83cf4a842a"
-version = "0.6.8"
+version = "0.6.11"
 
 [[deps.StructTypes]]
 deps = ["Dates", "UUIDs"]
@@ -1531,16 +2155,43 @@ version = "0.9.1+5"
 # ╔═╡ Cell order:
 # ╟─23962934-2638-4788-9677-ae42245801ec
 # ╟─30f48408-f16e-11ec-3d6b-650f1bf7f435
-# ╟─2f3a7b9d-3dac-4e12-abb1-ce09cef36e93
-# ╠═9aa9b5bf-f938-4e96-9ed1-bed5c53ff93c
+# ╟─09dae921-9730-48a0-94b0-dd825d0ed919
+# ╟─f20d5217-cbe7-4878-ad45-f1f90881384b
+# ╟─2ec95442-1bd2-4133-864f-037bc5c35c9e
+# ╟─4964a590-ef0e-4e2c-a90a-fe238d5766cf
+# ╠═ad558065-7d69-411d-a033-da3d9047547c
+# ╟─d6778a9d-2455-434d-b459-27195ac7a59f
+# ╠═4ae44687-2b39-4e92-93a3-e40b74415231
+# ╠═fc3805e2-5293-4cd0-ac25-48c520efb654
+# ╟─80732074-1d94-45ed-8e5e-ea92d3985a1c
+# ╟─c2e866df-a46b-4ca0-8b3f-e7fa2e7b4143
+# ╟─00ebf34a-dd75-48d4-834e-f6e0560df38d
+# ╟─33d28a0e-31f8-40f4-9060-a35a4fe3ecf6
+# ╟─aaac38e8-1d06-46ed-9607-a8e2fe1752e9
 # ╟─90baae39-478b-493c-ac23-4fadca9c3698
 # ╟─156674ce-b49e-44b6-8182-7f8da0a394af
-# ╟─78ac6273-5029-4aa0-9e44-caacab4e40ef
-# ╠═11bd73c1-c745-4d30-adc0-19209e0c0c82
+# ╟─44097395-f6b9-414b-8c5a-980c97feb553
+# ╟─6f088d8b-a987-4fbd-a8d8-58c0acbf8aa0
+# ╟─24b7f6f7-8204-4a31-aef9-c1d64b754fc3
+# ╟─e870a839-4c93-4693-8f1c-7b370082beec
+# ╠═c07e1d8b-113a-4382-af00-16332569fc8e
+# ╠═5fb5e842-b684-47b9-a60e-deedc485914c
+# ╠═8fdc31ec-178a-4ffd-b029-5590f192332f
+# ╠═cec97051-aec3-4e17-95eb-90d19b947c37
+# ╠═1453647c-213c-4627-a5b1-ffc1f95204a1
+# ╠═96476f2f-a791-4ea6-9f81-8a17a00d6c1f
+# ╟─7b4e20ce-815a-46c7-bcc5-7b6531542049
+# ╟─001c511c-34b9-4a25-b901-1b98a3eaea9b
+# ╠═772be193-8ca2-4eff-9e25-c6166efaefcf
+# ╠═b04743cd-bdc8-46a7-be77-8b0e116fae3a
+# ╠═734dd8c9-cf26-4cf8-baf2-63cf97c34c2b
+# ╟─457b66ff-7972-49b8-b57a-4b4fc5f0ad06
+# ╟─294d57f6-3415-40d4-83f7-d218ad6569cd
+# ╟─32870a35-1276-4d91-aa55-64f6256b4188
+# ╟─e715a1b3-c11b-4d01-96d3-af3b64dee96c
 # ╟─4acb1393-030f-4cab-a765-f8de5a75893b
 # ╟─b9b2534e-bf13-4146-8b47-949ff0b0052e
-# ╟─332ab61e-91d2-4dd7-9a59-699d8f6a4de1
-# ╟─d6ae4c8a-ab5b-413f-88df-b5f4fc678ff9
+# ╟─6e576917-f1c5-4535-b8d4-a9d1c7814e30
 # ╟─d0b2f6bb-7539-4dda-adc9-acc2ce9cca4a
 # ╟─8fe83aab-d193-4a28-a763-6420abcbb176
 # ╟─94caf041-6363-4b38-b2c2-daaf5a6aecf1
@@ -1551,7 +2202,7 @@ version = "0.9.1+5"
 # ╟─1333f8e7-bfdd-4f80-8eaa-124d184b03c6
 # ╟─5b27286b-0a51-49ff-a783-90bf8334e080
 # ╟─e3a0f37d-dd52-4d00-99a1-37076a474de0
-# ╟─e41c0fe1-6b26-4194-868b-34259293243c
 # ╟─808c11cb-f930-4fd6-b827-320e845a47a7
+# ╟─73912a13-87ce-4a0c-ab1b-b0bfd703e99e
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002

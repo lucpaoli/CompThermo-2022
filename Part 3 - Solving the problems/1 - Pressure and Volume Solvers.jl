@@ -1,5 +1,5 @@
 ### A Pluto.jl notebook ###
-# v0.19.8
+# v0.19.9
 
 using Markdown
 using InteractiveUtils
@@ -7,193 +7,107 @@ using InteractiveUtils
 # ╔═╡ 23962934-2638-4788-9677-ae42245801ec
 begin
 	using Clapeyron, ForwardDiff, Roots, Optim, LinearAlgebra, PolynomialRoots # Numerical packages
-	using LaTeXStrings, Plots, ShortCodes # Display and plotting
+	using LaTeXStrings, Plots, ShortCodes, Printf # Display and plotting
 	using HypertextLiteral
 	# using JSON2, Tables,Random # Data handling
 end
 
 # ╔═╡ 30f48408-f16e-11ec-3d6b-650f1bf7f435
 md"""
-### Section 3.3
-# The Flash Problem
+### Section 3.1
+# 	Volume Solvers
 
-The flash problem refers to knowing **when** a fluid will undergo a phase split, **how many phases** the fluid will split into, and the **composition** of each phase. We use these calculations all across chemical engineering, particularly in separation processes. For example, these are used when modelling flash drums, distillation columns and liquid-liquid extraction. They also appear when simulating petroleum reservoirs and other complex liquid flow.
+Now we know how to choose an equation of state for different situations, we need to investigate how to obtain the fluid properties at a specified state. To start with, we will look at how to solve for the volume at a given pressure, temperature, and phase for a pure fluid. From there, we will see how this changes when the phase is not known beforehand, and when dealing with a multicomponent mixture.
 
-## Key concepts
+Mathematically, this problem can be written as solving
 
-### Chemical equilibrium 
+$$P(v,T_0,\vec{z}) = p_0$$
 
-At equilibrium, we have the **equivalence of chemical potential**, so that for a mixture with $C$ components and $P$ phases $(\alpha, \beta, \dots, P)$ we have an equivalence relation for every component _i_ in _C_:
+for all values of $v$.
 
-$$\mu_i^\alpha = \mu_i^\beta = \dots = \mu_i^P$$
+## Pure fluids
+### Cubic EoS
 
-Identically, we have the **equivalent of fugacity**:
+As you have seen in section 2, the general cubic equation of state can be written as
 
-$$f_i^\alpha = f_i^\beta = \dots = f_i^P$$
+$$P = \frac{RT}{v-b} - \frac{a\alpha(T)}{(v + \delta_1 b)(v + \delta_2b)}$$
 
-We can express the compositions at vapour liquid equilibrium (VLE) using **K factors**. These represent the distribution of each component between phases.
+where the values of $\delta_1, \delta_2$ are specific to each equation of state (van der Waals, Peng Robinson, Redlich Kwong), and the form of the **alpha function**, $a(T)$, can be selected to match specific types of components or problems. In this workbook we will consider the van der Waals EoS, which is the case when 
 
-$$K_i = \frac{y_i}{x_i}$$
+$$\delta_1 = \delta_2 = 0$$
+$$\alpha(T) = 1$$
+"""
 
-Using the equality of fugacity, we can also express this in terms of the fugacity coefficient
+# ╔═╡ 2f3a7b9d-3dac-4e12-abb1-ce09cef36e93
+md"""
+Giving us
 
-$$\begin{align}
-f_i^L &= x_i \varphi_i^L P\\
-f_i^V &= y_i \varphi_i^V P\\
-x_i \varphi_i^L \cancel{P} &= y_i \varphi_i^V \cancel{P}\\
-K_i &= \frac{\varphi_i^L}{\varphi_i^V}
+$$p = \frac{RT}{v-b} - \frac{a}{v^2}$$
+
+where
+
+$$\begin{align} 
+a &= \frac{27}{64}\frac{(RT_\mathrm{c})^2}{p_\mathrm{c}}\\
+b &= \frac{1}{8}\frac{RT_\mathrm{c}}{p_\mathrm{c}}\\
 \end{align}$$
 
-### The "trivial solution"
+To solve this for the volume, we can leverage the fact you can rearrange it as a cubic equation in terms of the **compressibility factor**, Z.
 
-In flash problems we run the risk of converging to the so-called trivial solution. This is where each phase is identical, meaning the equality of chemical potential is inherently satisfied. In a situation where we know there should be a 2-phase region, it can be hard to avoid converging to this solution.
+To do this, we multiply the expression through by the denominators and substitute in the definition of Z.
 
-### Mole numbers
-
-In these problems, it is often advantageous to work using **mole numbers** in place of mole fractions. Mole numbers refers to the number of moles present, and isn't normalised to 1 like mole fractions. This is useful as it allows us to consider the problem using _unconstrained minimisation_, where we are not required to keep all mole fractions summing to 1.
-
-## The Isothermal Flash
-
-We will begin as simply as possible with a T,P 2 phase flash. This refers to taking a state specified by **temperature** and **pressure**, assuming **2 phases** are present, and solving for the resulting molar compositions. We will begin by solving this using **successive substitution**.
-
-Successive substitution is a very simple algorithm that can be employed when you can describe a function in the form:
-
-$$x = f(x)$$
-
-
-## Successive substitution P,T flash algorithm overview
-
-1. Obtain initial guesses for K factors (**Wilson approximation**)
-
-2. Solve for the vapour fraction (**Rachford-rice equation**)
-
-3. Use mass balances to calculate a new $\vec{x}, \vec{y}$
-$$\begin{gather}
-x_i = \frac{z_i}{1-\beta+\beta K_i}\\
-y_i = K_ix_i
-\end{gather}$$
-
-4. Evaluate component fugacity coefficients at the current state
+$$Z = \frac{Pv}{RT}$$
 
 $$\begin{gather}
-\varphi_i^L = \varphi_i^L(T,P,\vec{x})\\
-\varphi_i^V = \varphi_i^V(T,P,\vec{y})
+pv^2(v-b) = RTv^2 - a(v-b)\\
+pv^3 - (bp + RT)v^2 + av - ab = 0\\
+Z^3 - \left(1 + \frac{bp}{RT}\right)Z^2 + \left(\frac{ap}{(RT)^2}\right)Z - \frac{abp^2}{(RT)^3} = 0
 \end{gather}$$
 
-5. Calculate new K-factors
-$$K_i = \frac{\varphi_i^L}{\varphi_i^V}$$
+To express this cubic neatly we define 2 constants, $A$ and $B$.
 
-6. Check for convergence. If not converged, repeat steps 2-5.
+$$\begin{align} 
+A &= a\cdot\frac{p}{(RT)^2}\\
+B &= b\cdot\frac{p}{RT}
+\end{align}$$
 
-Successive substitution is well known as the simplest way to solve the flash problem. It performs well initially and in the sub-critical region, however as we approach the critical point convergence becomes very slow and can take many iterations.
+The cubic we then need to solve is
 
-To accelerate the convergence in the vicinity of the critial point, it is common to use a Newton or Quasi-Newton method. Newton methods display **quadratic convergence** compared to the **linear convergence** of successive substitution.
+$$Z^3 - (1 + B)Z^2 + AZ - AB = 0$$
+
+A similar result can be obtained for any cubic equation.
+
+Let's now solve the van der Waals equation for Z and see if our answers make sense. Complete the expressions for A and B in the code below:
 """
 
-# ╔═╡ 33d28a0e-31f8-40f4-9060-a35a4fe3ecf6
-md"""
-## 0. Specifying our state
-
-Before we begin any calculations, we need to specify a few things. We need to define the composition of our feed, our thermodynamic model, and the pressure and temperature we're conducting the flash at. Here, we're using **Peng Robinson** to model a 3 component mixture.
-
-$\begin{array}{lc}
-\hline \text{Component} & \text {Mole fraction} \\ \hline
-\text{Methane} & 0.4 \\
-\text{Ethane} & 0.4 \\
-\text{Hydrogen Sulfide} & 0.2 \\
-\hline
-\end{array}$
-
-$\begin{array}{lc}
-\hline \text{Specification} & \text {Value} \\ \hline
-\text{Pressure} & 255\text{ K} \\
-\text{Temperature} & 60\text{ bar} \\
-\hline
-\end{array}$
-"""
-
-# ╔═╡ 62ddcabc-a2f6-4736-948a-2951d71aba0f
+# ╔═╡ 9aa9b5bf-f938-4e96-9ed1-bed5c53ff93c
 begin
-	comps = ["methane", "ethane", "hydrogen sulfide"] # Define the components
-	model = PR(comps) # Create our fluid model
+	R = 8.314
+	(Tc, pc) = (373.3, 89.7e5) # Critical parameters for H2S
+	(T, p) = (298.0, 101325.0) # Current state
+	a = 27/64 * (R*Tc)^2/pc
+	b = 1/8 * (R*Tc)/pc
 	
-	# Describe our state
-	P = 60e5 # Pa
-	T = 255.0 # K
-	z = [0.4, 0.4, 0.2]
-end;
-
-# ╔═╡ aaac38e8-1d06-46ed-9607-a8e2fe1752e9
-md"""
-## 1. The Wilson equation
-
-$$\ln K_i = \ln \frac{P_{c,i}}{P_i} + 5.373(1+\omega_i)\left(1-\frac{T_{c,i}}{T}\right)$$
-
-The Wilson approximation is based on the ideal solution approximation, and is structured to match pure component vapour pressure at $T_r = 0.7$ and $T_r = 1.0$. It relies on the **critical temperature and pressure** as well as the **acentric factor**, all easily obtainable properties of the pure components. While it generally performs quite well, especially for mixtures relevant to the petrochemical industry, it has very poor predictions when used with hydrogen.
-
-Good initial guesses are particularly important when avoiding converging to the **trivial solution**.
-
-Below, complete the code to calculate the initial K-factors for a 3 component mixture of [DECIDE WHAT MIXTURE TO WORK WITH]
-"""
-
-# ╔═╡ d5bf19b0-30d3-42a9-9347-464931e04815
-md"""
-## 2. Rachford-Rice equation
-
-$$\begin{gather}
-f(\beta) = \sum_i^{C} \frac{z_i(K_i-1)}{1+\beta(K_i - 1)} = 0\\
-f'(\beta) = \sum_i^C \frac{z_i(K_i-1)^2}{(1+\beta(K_i - 1))^2} = 0
-\end{gather}$$
-
-Where $\beta$ is the vapour fraction.
-
-$$\beta = \frac{V}{F}$$
-
-Proposed in 1952 by Rachford and Rice, this assumes constant K-factors and solves for the **vapour fraction**, $\beta$. As this equation is univariate with analytical derivatives, it is easy to solve this using bisection or Newton's method. Solutions exist between:
-
-$$\frac{1}{1-K_{max}} < \beta < \frac{1}{1-K_{min}}$$
-
-However, this often results in values outside the physical domain of $[0, 1]$. Allowing values outside of the physical domain is called the _negative flash_, [BRIEF EXPLANATION OF NEGATIVE FLASH].
-
-One of the key features of the Rachford-Rice equation, and the reason it's expressed in the form that it is, is that it is **monotonically decreasing** across the valid range of solutions. This makes root finding far easier, and allows for us to guarantee convergence.
-
-
-"""
-
-# ╔═╡ a17c36cd-7a12-4156-8536-fe1d48dac0b3
-md"""
-Finish the routine below to solve the rachford rice equation using a step-limited 	Newton method.
-
-The Newton method is an iterative numerical routine with each step given by:
-
-$$x_{n+1}=x_{n}-{\frac {f(x_{n})}{f'(x_{n})}}$$
-"""
-
-# ╔═╡ 21da24c9-2c13-40ce-bf06-70fffb095c4d
-function rachford_rice(z, K, β)
-	 # @. is a macro broadcasting the . operator to make every operation elementwise
-	inner_vec = @. z*(K - 1) / (1 + β*(K - 1))
-	f = sum(inner_vec)
-	f' = sum(inner_vec.^2)
-	return (f, f')
-end
-function solve_β(z, K)
-	inner_vec(β) = @. z*(K - 1) / (1 + β*(K - 1)) # Remember @. is a macro broadcasting the . operator to make every operation elementwise
-	f(β) = sum(inner_vec(β)) 
-	f′(β) = sum(inner_vec.^2)
-	βmin = 1/(1-Kmax)
-	βmax = 1/(1-Kmin)
-
-	β = (βmin + βmax)/2
-	δβ = 1.0
+	A = a*p/(R*T)^2
+	B = b*p/(R*T)
+	# A = a
+	# B = b
 	
-	while abs(δβ) > ϵ # While the change is greater than the machine epsilon (≈1e-16)
-		βnew = β - f(β)/f′(β)
-		δβ = βnew - β
-		β = βnew
-	end
-	return β
+	poly = [-A*B, A, -(1+B), 1.0]
+	Zvec = roots(poly)
+	Vvec = Zvec.*(R*T/p)
 end
+
+# ╔═╡ 78ac6273-5029-4aa0-9e44-caacab4e40ef
+md"""
+Now we have that working, we can see we have 3 real roots. How do we know which one to choose? We know that the smallest root is _liquidlike_, the largest root is _vapourlike_, and that the middle root has no physical meaning. From our physical knowledge of hydrogen sulfide, we can tell that it should be a gas and so we should take the vapourlike root, but this isn't something we can apply rigorously or put into our code.
+
+In some situations the cubic equation will have imaginary roots which can obviously be discarded, but most of the time a decision between roots has to be made. To do this, we will introduce the **gibbs free energy**, as we know that the phase with the lowest gibbs free energy (or chemical potential) will exist at the given conditions.
+
+To express the chemical potential
+"""
+
+# ╔═╡ 11bd73c1-c745-4d30-adc0-19209e0c0c82
+
 
 # ╔═╡ 4acb1393-030f-4cab-a765-f8de5a75893b
 html"<br><br><br><br><br><br><br><br><br><br><br><br>"
@@ -203,73 +117,15 @@ md"## Function library
 
 Just some helper functions used in the notebook."
 
-# ╔═╡ 6e576917-f1c5-4535-b8d4-a9d1c7814e30
-function acentric_factor(pure)
-	Tc,pc,_ = crit_pure(pure)
-	ps = first(saturation_pressure(pure,0.7*Tc))
-	ω = -log10(ps/pc) - 1.0
-	return ω
-end
+# ╔═╡ 332ab61e-91d2-4dd7-9a59-699d8f6a4de1
+md"""
+###### Specific
+"""
 
-# ╔═╡ 8b3e3994-566f-4e6f-a020-5cc62bbc0096
-begin
-	function Wilson_K_factor(pure_model, P, T)
-		Tc, Pc, vc = crit_pure(pure_model)
-		ω = acentric_factor(pure_model)
-		
-		# Complete the expression for calculating K-factors
-		K = exp(log(Pc/P) + 5.373*(1+ω)*(1-Tc/T))
-		# K = NaN
-		
-		return K
-	end
-	
-	pure_models = split_model.(model) # Create a vector of models for each of our pure substances
-
-	# Calculate K factors by completing and calling Wilson_K_factor for each component
-	K0 = Wilson_K_factor.(pure_models, P, T)
-	# K0 = NaN
-end;
-
-# ╔═╡ 90baae39-478b-493c-ac23-4fadca9c3698
-begin
-	try
-		@htl("""
-		<table>
-		  <tr>
-		    <th>Component</th>
-		    <th>K</th>
-		  </tr>
-		  <tr>
-		    <td>$(comps[1])</td>
-		    <td>$(round(K0[1]; digits=4))</td>
-		  </tr>
-		  <tr>
-		    <td>$(comps[2])</td>
-		    <td>$(round(K0[2]; digits=4))</td>
-		  </tr>
-		  <tr>
-		    <td>$(comps[3])</td>
-		    <td>$(round(K0[3]; digits=4))</td>
-		  </tr>
-		</table>
-		""")
-	catch
-	end
-end
-
-# ╔═╡ 0c415fe7-d04a-4d42-bf5a-6c2916b12267
-let
-	rr_plot(β) = sum(@. z*(K0 - 1) / (1 + β*(K0 - 1)))
-	β_vec = range(1/(1-maximum(K0)), 1/(1-minimum(K0)), length=100)
-	plot(title="The rachford rice equation evaluated at K₀", xlabel="β", ylabel="f(β)")
-	plot!(β_vec, rr_plot.(β_vec), label="Rachford-Rice equation")
-	vline!([0.0, 1.0], label="physical domain of β")
-	hline!([0.0], linecolor=:black)
-end
-
-# ╔═╡ d90bacde-3888-45da-9428-cca6110efe34
-solve_β(z, K0)
+# ╔═╡ d6ae4c8a-ab5b-413f-88df-b5f4fc678ff9
+md"""
+###### Generic
+"""
 
 # ╔═╡ d0b2f6bb-7539-4dda-adc9-acc2ce9cca4a
 hint(text) = Markdown.MD(Markdown.Admonition("hint", "Hint", [text]))
@@ -290,36 +146,27 @@ yays = [md"Fantastic!", md"Splendid!", md"Great!", md"Yay ❤", md"Great! 🎉",
 correct(text=rand(yays)) = Markdown.MD(Markdown.Admonition("correct", "Got it!", [text]))
 
 # ╔═╡ 970bb661-c959-4f0c-a1d6-50f655b80ef8
-not_defined(variable_name) = Markdown.MD(Markdown.Admonition("danger", "Oopsie!", [md"Make sure that you define **$(Markdown.Code(string(variable_name)))**"]))
+not_defined(variable_name) = Markdown.MD(Markdown.Admonition("danger", "Oopsie!", [md"Make sure that you define a variable called **$(Markdown.Code(string(variable_name)))**"]))
 
 # ╔═╡ 156674ce-b49e-44b6-8182-7f8da0a394af
-if !@isdefined(K0)
-	not_defined(:K0)
+if !@isdefined(Zvec)
+	not_defined(:Zvec)
 else
 	let
-		try
-			function Wilson_K_factor_test(pure_model, P, T)
-			Tc, Pc, _ = crit_pure(pure_model)
-			ω = acentric_factor(pure_model)
-			K = exp(log(Pc/P) + 5.373*(1+ω)*(1-Tc/T))
-			return K
-			end
-			
-			Ksol = Wilson_K_factor_test.(pure_models, P, T)
-			pure_test_model = PR(["methane"])
-			P_test, T_test = (1e6, 190.0)
-			K_test = Wilson_K_factor(pure_test_model, P_test, T_test)
-			K_test_sol = 0.9
-			# Check if function defined correctly and if K0 calculated correctly
-			if K0 ≈ Ksol
+		Asol = a*p/(R*T)^2
+		Bsol = b*p/(R*T)
+		if (A==Asol) && (B==Bsol)
+			if (Zvec == roots([-A*B, A, -(1+B), 1.0]))
 				correct()
-			elseif K_test == K_test_sol
-				almost(md"Make you've changed `K0` correctly")
-			else # If nothing correct
-				keep_working(md"Make sure you've changed both the function `Wilson_K_factor` and `K0` correctly")
+			else
+				almost(md"Make sure `poly` and `Zvec` are defined correctly")
 			end
-		catch
-			keep_working(md"Make sure you've changed both the function `Wilson_K_factor` and `K0` correctly")
+		elseif (A==Asol)
+			still_missing(md"Make sure `B` is defined correctly")
+		elseif (B==Bsol)
+			still_missing(md"Make sure `A` is defined correctly")
+		else
+			keep_working(md"Make sure you've defined `A` and `B` carefully")
 		end
 	end
 end
@@ -392,21 +239,43 @@ function latex_table(headers, names, values) # TODO: Make this work on input lis
 	# """
 end
 
-# ╔═╡ e41c0fe1-6b26-4194-868b-34259293243c
-md"""
-$\begin{array}{lc}
-\hline \text{Variable} & \text { Value } \\
-\hline \delta_1 & 0 \\
-\delta_2 & 0 \\
-\alpha(T) & 1 \\
-\hline
-\end{array}$
-"""
-
 # ╔═╡ 808c11cb-f930-4fd6-b827-320e845a47a7
 function reduce_complex(Zvec)
 	Zvec = Vector{Union{Float64, ComplexF64}}(Zvec)
 	Zvec[abs.(imag.(Zvec)) .< eps()] .= real(Zvec[abs.(imag.(Zvec)) .< eps()])
+end
+
+# ╔═╡ 90baae39-478b-493c-ac23-4fadca9c3698
+begin
+	try
+		Zvec_show = reduce_complex(Zvec)
+		Vvec_show = reduce_complex(Vvec)
+		@htl("""
+		<table>
+		  <tr>
+		    <th>Root</th>
+		    <th>Z</th>
+			<th>V (m³)</th>
+		  </tr>
+		  <tr>
+		    <td>1</td>
+		    <td>$(round(Zvec_show[1]; digits=4))</td>
+		    <td>$(@sprintf "%.2e" Vvec_show[1])</td>
+		  </tr>
+		  <tr>
+		    <td>2</td>
+		    <td>$(round(Zvec_show[2]; digits=4))</td>
+		    <td>$(@sprintf "%.2e" Vvec_show[2])</td>
+		  </tr>
+		  <tr>
+		    <td>3</td>
+		    <td>$(round(Zvec_show[3]; digits=4))</td>
+		    <td>$(@sprintf "%.2e" Vvec_show[3])</td>
+		  </tr>
+		</table>
+		""")
+	catch
+	end
 end
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
@@ -420,6 +289,7 @@ LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Optim = "429524aa-4258-5aef-a3af-852621145aeb"
 Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
 PolynomialRoots = "3a141323-8675-5d76-9d11-e1df1406c778"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 Roots = "f2b01f46-fcfa-551c-844a-d8ac1e96c665"
 ShortCodes = "f62ebe17-55c5-4640-972f-b59c0dd11ccf"
 
@@ -1648,22 +1518,18 @@ version = "0.9.1+5"
 """
 
 # ╔═╡ Cell order:
-# ╠═23962934-2638-4788-9677-ae42245801ec
-# ╠═30f48408-f16e-11ec-3d6b-650f1bf7f435
-# ╟─33d28a0e-31f8-40f4-9060-a35a4fe3ecf6
-# ╠═62ddcabc-a2f6-4736-948a-2951d71aba0f
-# ╟─aaac38e8-1d06-46ed-9607-a8e2fe1752e9
-# ╠═8b3e3994-566f-4e6f-a020-5cc62bbc0096
+# ╟─23962934-2638-4788-9677-ae42245801ec
+# ╟─30f48408-f16e-11ec-3d6b-650f1bf7f435
+# ╟─2f3a7b9d-3dac-4e12-abb1-ce09cef36e93
+# ╠═9aa9b5bf-f938-4e96-9ed1-bed5c53ff93c
 # ╟─90baae39-478b-493c-ac23-4fadca9c3698
 # ╟─156674ce-b49e-44b6-8182-7f8da0a394af
-# ╠═d5bf19b0-30d3-42a9-9347-464931e04815
-# ╟─0c415fe7-d04a-4d42-bf5a-6c2916b12267
-# ╟─a17c36cd-7a12-4156-8536-fe1d48dac0b3
-# ╠═21da24c9-2c13-40ce-bf06-70fffb095c4d
-# ╠═d90bacde-3888-45da-9428-cca6110efe34
+# ╟─78ac6273-5029-4aa0-9e44-caacab4e40ef
+# ╠═11bd73c1-c745-4d30-adc0-19209e0c0c82
 # ╟─4acb1393-030f-4cab-a765-f8de5a75893b
 # ╟─b9b2534e-bf13-4146-8b47-949ff0b0052e
-# ╟─6e576917-f1c5-4535-b8d4-a9d1c7814e30
+# ╟─332ab61e-91d2-4dd7-9a59-699d8f6a4de1
+# ╟─d6ae4c8a-ab5b-413f-88df-b5f4fc678ff9
 # ╟─d0b2f6bb-7539-4dda-adc9-acc2ce9cca4a
 # ╟─8fe83aab-d193-4a28-a763-6420abcbb176
 # ╟─94caf041-6363-4b38-b2c2-daaf5a6aecf1
@@ -1674,7 +1540,6 @@ version = "0.9.1+5"
 # ╟─1333f8e7-bfdd-4f80-8eaa-124d184b03c6
 # ╟─5b27286b-0a51-49ff-a783-90bf8334e080
 # ╟─e3a0f37d-dd52-4d00-99a1-37076a474de0
-# ╟─e41c0fe1-6b26-4194-868b-34259293243c
 # ╟─808c11cb-f930-4fd6-b827-320e845a47a7
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002
